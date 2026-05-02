@@ -1,0 +1,28 @@
+# LightGBM 模型配置（平铺特征，DatasetH）
+# 对应 qlib.contrib.model.gbdt.LGBModel
+# **kwargs 直接传给 lightgbm 的参数字典（objective 由 loss 自动设置）
+
+model_meta:
+  name: "lgbm"
+  dataset_type: "flat"
+  freq_key: "1day"
+  # 树模型对高维特征鲁棒，使用全部因子组（含基本面），为下一期扩展因子保留最大空间
+  feature_groups: ~
+
+model:
+  class: "LGBModel"
+  module_path: "qlib.contrib.model.gbdt"
+  kwargs:
+    loss: "mse"
+    early_stopping_rounds: 50
+    num_boost_round: 500
+    # 以下均为 lightgbm 原生参数，通过 **kwargs 注入
+    learning_rate: 0.05
+    num_leaves: 128
+    max_depth: 7
+    min_child_samples: 100
+    feature_fraction: 0.8
+    bagging_fraction: 0.8
+    bagging_freq: 5
+    reg_alpha: 0.0
+    reg_lambda: 0.001

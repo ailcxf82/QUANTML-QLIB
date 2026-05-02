@@ -1,0 +1,33 @@
+# LSTM 模型配置（时序，TSDatasetH）
+# 对应 qlib.contrib.model.pytorch_lstm.LSTM
+# d_feat 由 run_experiment.py 根据 feature_groups 动态覆盖，YAML 值仅作初始占位
+
+model_meta:
+  name: "lstm"
+  dataset_type: "ts"      # ts → TSDatasetH（lookback 窗口）
+  step_len: 20            # lookback 步长（交易日数）
+  freq_key: "1day"
+  # 时序模型侧重捕捉量价序列模式，基本面因子时序变化慢且对序列建模贡献有限
+  feature_groups:
+    - momentum
+    - volume
+    - technical
+
+model:
+  class: "LSTM"
+  module_path: "qlib.contrib.model.pytorch_lstm_ts"
+  kwargs:
+    d_feat: 20
+    hidden_size: 64
+    num_layers: 2
+    dropout: 0.1
+    n_epochs: 100
+    lr: 0.001
+    metric: ""
+    batch_size: 800
+    early_stop: 20
+    loss: "mse"
+    optimizer: "adam"
+    n_jobs: 4
+    GPU: -1
+    seed: 42

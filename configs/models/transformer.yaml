@@ -1,0 +1,34 @@
+# Transformer 模型配置（时序，TSDatasetH）
+# 对应 qlib.contrib.model.pytorch_transformer_ts.TransformerModel
+# d_feat 由 run_experiment.py 根据 feature_groups 动态覆盖，YAML 值仅作初始占位
+
+model_meta:
+  name: "transformer"
+  dataset_type: "ts"
+  step_len: 20
+  freq_key: "1day"
+  # 时序模型侧重捕捉量价序列模式，基本面因子时序变化慢且对序列建模贡献有限
+  feature_groups:
+    - momentum
+    - volume
+    - technical
+
+model:
+  class: "TransformerModel"
+  module_path: "qlib.contrib.model.pytorch_transformer_ts"
+  kwargs:
+    d_feat: 20
+    d_model: 64
+    nhead: 4
+    num_layers: 2
+    dropout: 0.1
+    batch_size: 512
+    n_epochs: 100
+    lr: 0.0001
+    metric: ""
+    early_stop: 10
+    loss: "mse"
+    optimizer: "adam"
+    reg: 0.001
+    GPU: -1
+    seed: 42

@@ -1,0 +1,17 @@
+---
+description: 
+alwaysApply: true
+---
+
+# 编码规范（核心）
+
+- 代码默认使用英文标识符，注释与文档使用中文简体，避免中英混杂语义。
+- Python 强制类型注解；TypeScript 禁止 `any`（仅可在边界层临时使用并附 TODO）。
+- 公共函数必须包含输入、输出、异常语义；策略逻辑需说明可复现实验参数。
+- 命名规则：
+  - Python：`snake_case`（模块/函数/变量），`PascalCase`（类）。
+  - TypeScript：`camelCase`（变量/函数），`PascalCase`（类型/类/组件）。
+- 禁止硬编码魔法数；交易阈值、滑点、手续费、调仓频率等必须参数化并可配置。
+- 日志统一结构化输出，至少包含：`run_id`、`instrument`、`datetime`、`signal`、`version`。
+- 每次提交应保证可运行：最小通过单元测试 + 关键流水线 smoke test。
+- 运行环境要在qlib_zhengshi这个虚拟环境

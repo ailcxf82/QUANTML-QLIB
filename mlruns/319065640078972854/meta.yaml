@@ -1,0 +1,6 @@
+artifact_location: file:D:\quant_project\QuantML-Qlib\mlruns/319065640078972854
+creation_time: 1777650060397
+experiment_id: '319065640078972854'
+last_update_time: 1777650060397
+lifecycle_stage: active
+name: lstm_daily_backtest

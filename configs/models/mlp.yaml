@@ -1,0 +1,29 @@
+# MLP 模型配置（平铺特征，DatasetH）
+# 对应 qlib.contrib.model.pytorch_nn.DNNModelPytorch
+
+model_meta:
+  name: "mlp"
+  dataset_type: "flat"    # flat → DatasetH（单时间步）
+  freq_key: "1day"
+  # 平铺神经网络对冗余因子较敏感，使用全部因子但后续可收窄到高 IC 因子
+  feature_groups: ~
+
+model:
+  class: "DNNModelPytorch"
+  module_path: "qlib.contrib.model.pytorch_nn"
+  kwargs:
+    loss: "mse"
+    optimizer: "adam"
+    lr: 0.001
+    max_steps: 300
+    batch_size: 2048
+    early_stop_rounds: 30
+    eval_steps: 20
+    GPU: -1
+    seed: 42
+    # 新版 PyTorch 移除了 ReduceLROnPlateau verbose 参数，scheduler 置 null 跳过
+    scheduler: ~
+    pt_model_uri: "qlib.contrib.model.pytorch_nn.Net"
+    pt_model_kwargs:
+      input_dim: 20
+      layers: [128, 64, 32]

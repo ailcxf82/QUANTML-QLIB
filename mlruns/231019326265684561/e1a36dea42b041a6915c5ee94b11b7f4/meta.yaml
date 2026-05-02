@@ -1,0 +1,14 @@
+artifact_uri: file:D:\quant_project\QuantML-Qlib\mlruns/231019326265684561/e1a36dea42b041a6915c5ee94b11b7f4/artifacts
+end_time: 1777650217406
+entry_point_name: ''
+experiment_id: '231019326265684561'
+lifecycle_stage: active
+run_id: e1a36dea42b041a6915c5ee94b11b7f4
+run_name: lgbm_daily_227c693e
+source_name: ''
+source_type: 4
+source_version: ''
+start_time: 1777650059794
+status: 3
+tags: []
+user_id: Administrator

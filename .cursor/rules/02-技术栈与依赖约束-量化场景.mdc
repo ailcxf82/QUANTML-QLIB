@@ -1,0 +1,16 @@
+---
+description: 量化场景下的技术栈和依赖边界约束
+alwaysApply: true
+---
+
+# 技术栈与依赖约束（量化场景重点）
+
+- 后端研究与训练主语言为 Python，数据服务/控制台/API 层可用 TypeScript 实现。
+- 因子计算、标签构造、训练、回测优先使用 QLib 官方模块；扩展时继承其接口而非绕开框架。
+- 依赖管理：
+  - Python 使用 `pyproject.toml` 或 `requirements*.txt` 锁版本。
+  - TypeScript 使用 `package-lock.json` 或 `pnpm-lock.yaml` 锁版本。
+- 禁止在策略核心代码中直接访问外网资源；数据源接入必须走可审计适配层。
+- 训练框架优先选择 LightGBM/XGBoost/线性模型；新增模型需给出收益、换手、稳定性对比。
+- 禁止引入未经验证的高频 I/O 依赖；新增依赖必须说明性能影响和替代方案。
+- 关键依赖升级需附兼容性验证：特征产出一致性 + 回测结果漂移分析。

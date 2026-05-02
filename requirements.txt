@@ -1,0 +1,7 @@
+pyqlib
+pandas
+pyyaml
+pyarrow
+lightgbm
+matplotlib
+numpy

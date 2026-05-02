@@ -1,0 +1,167 @@
+qlib_init:
+  provider_uri: "D:/qlib_data/qlib_data"
+  region: cn
+
+experiment:
+  run_id: "mlp_daily_cn_v1"
+  # 数据实际范围 2020-01-02 ~ 2026-04-30，按 7:1.5:1.5 切分
+  market: "all"
+  benchmark: "000905.SZ"
+  start_time: "2020-01-01"
+  end_time: "2026-04-28"
+  train_end_time: "2023-06-30"
+  valid_end_time: "2024-12-31"
+  test_start_time: "2025-01-01"
+  seed: 42
+  account: 100000000
+
+model:
+  class: "DNNModelPytorch"
+  module_path: "qlib.contrib.model.pytorch_nn"
+  kwargs:
+    loss: "mse"
+    optimizer: "adam"
+    lr: 0.001
+    max_steps: 300
+    batch_size: 2048
+    early_stop_rounds: 30
+    eval_steps: 20
+    GPU: -1
+    seed: 42
+    # 新版 PyTorch 移除了 ReduceLROnPlateau verbose 参数，scheduler 设为 null 跳过
+    scheduler: ~
+    pt_model_uri: "qlib.contrib.model.pytorch_nn.Net"
+    pt_model_kwargs:
+      input_dim: 20
+      layers: [128, 64, 32]
+
+dataset:
+  class: "DatasetH"
+  module_path: "qlib.data.dataset"
+  kwargs:
+    handler:
+      class: "DataHandlerLP"
+      module_path: "qlib.data.dataset.handler"
+      kwargs:
+        start_time: "2020-01-01"
+        end_time: "2026-04-30"
+        instruments: "all"
+        infer_processors:
+          - class: Fillna
+            module_path: qlib.data.dataset.processor
+            kwargs:
+              fields_group: feature
+          - class: CSZScoreNorm
+            module_path: qlib.data.dataset.processor
+            kwargs:
+              fields_group: feature
+              method: robust
+          # 归一化后兜底，防止极少数零方差列残留 NaN
+          - class: Fillna
+            module_path: qlib.data.dataset.processor
+            kwargs:
+              fields_group: feature
+        learn_processors:
+          - class: DropnaLabel
+            module_path: qlib.data.dataset.processor
+          - class: Fillna
+            module_path: qlib.data.dataset.processor
+            kwargs:
+              fields_group: feature
+          - class: CSZScoreNorm
+            module_path: qlib.data.dataset.processor
+            kwargs:
+              fields_group: feature
+              method: robust
+          # 归一化后兜底，防止极少数零方差列残留 NaN
+          - class: Fillna
+            module_path: qlib.data.dataset.processor
+            kwargs:
+              fields_group: feature
+          - class: CSZScoreNorm
+            module_path: qlib.data.dataset.processor
+            kwargs:
+              fields_group: label
+              method: robust
+        data_loader:
+          class: QlibDataLoader
+          module_path: qlib.data.dataset.loader
+          kwargs:
+            config:
+              feature:
+                # 格式: [[expr1, expr2, ...], [name1, name2, ...]]
+                # 使用本数据集实际存在的字段（已复权价格 + 量能 + 技术指标 + 估值）
+                # 格式: [[expr1, expr2, ...], [name1, name2, ...]]
+                # 所有特征均来自本数据集实际存在的字段（已复权价格+量能+技术指标+估值）
+                # 注意: 避免使用常量特征（如 vol/(vol+eps) ≈ 1），防止 CSZScoreNorm 产生 NaN
+                - - "$close_qfq/Ref($close_qfq,1)-1"
+                  - "($close_qfq-$open_qfq)/$open_qfq"
+                  - "($high_qfq-$low_qfq)/$open_qfq"
+                  - "(2*$close_qfq-$high_qfq-$low_qfq)/($high_qfq-$low_qfq+1e-12)"
+                  - "Ref($close_qfq,1)/Ref($close_qfq,2)-1"
+                  - "Ref($close_qfq,2)/Ref($close_qfq,5)-1"
+                  - "($volume-Ref($volume,1))/(Ref($volume,1)+1e-12)"
+                  - "$volume/Mean($volume,5)"
+                  - "$volume/Mean($volume,20)"
+                  - "$turnover_rate"
+                  - "Std($close_qfq/Ref($close_qfq,1)-1,5)"
+                  - "Std($close_qfq/Ref($close_qfq,1)-1,20)"
+                  - "Mean($close_qfq,5)/Mean($close_qfq,20)-1"
+                  - "Mean($close_qfq,10)/Mean($close_qfq,60)-1"
+                  - "$rsi_qfq_12/100"
+                  - "$macd_dif_qfq"
+                  - "$kdj_k_qfq/100"
+                  - "$pb"
+                  - "$total_mv"
+                  - "$net_amount"
+                - - "RET1"
+                  - "KMID"
+                  - "KLEN"
+                  - "KSFT"
+                  - "RET2"
+                  - "RET5"
+                  - "VOL_CHG"
+                  - "VOL5"
+                  - "VOL20"
+                  - "TURN"
+                  - "STD5"
+                  - "STD20"
+                  - "MA5_20"
+                  - "MA10_60"
+                  - "RSI12"
+                  - "MACD_DIF"
+                  - "KDJK"
+                  - "PB"
+                  - "MV"
+                  - "NET_AMT"
+              label:
+                # 格式: [[expr], [name]]
+                - - "Ref($close_qfq,-2)/Ref($close_qfq,-1)-1"
+                - - "LABEL0"
+    segments:
+      train: ["2020-01-01", "2023-06-30"]
+      valid: ["2023-07-01", "2024-12-31"]
+      test: ["2025-01-01", "2026-04-30"]
+
+strategy:
+  class: "TopkDropoutStrategy"
+  module_path: "qlib.contrib.strategy"
+  kwargs:
+    topk: 50
+    n_drop: 5
+
+executor:
+  class: "SimulatorExecutor"
+  module_path: "qlib.backtest.executor"
+  kwargs:
+    time_per_step: "day"
+    generate_portfolio_metrics: true
+
+backtest:
+  exchange_kwargs:
+    freq: "day"
+    limit_threshold: 0.095
+    deal_price: "close"
+    open_cost: 0.0005
+    close_cost: 0.0015
+    min_cost: 5

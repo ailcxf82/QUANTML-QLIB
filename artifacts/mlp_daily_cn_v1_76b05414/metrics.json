@@ -1,0 +1,19 @@
+{
+  "run_id": "mlp_daily_cn_v1_76b05414",
+  "version": "v1",
+  "config": "D:\\quant_project\\QuantML-Qlib\\configs\\mlp_daily_backtest.yaml",
+  "timing_seconds": {
+    "dataset_build_sec": 87.87,
+    "train_sec": 15.3,
+    "backtest_sec": 19.8,
+    "total_sec": 124.14
+  },
+  "metrics": {
+    "annualized_return": 0.128168772475758,
+    "max_drawdown": -0.6440406057226034,
+    "sharpe": NaN,
+    "information_ratio": 0.26257301840055636,
+    "turnover": 0.21029443904108186,
+    "win_rate": 0.6320754716981132
+  }
+}

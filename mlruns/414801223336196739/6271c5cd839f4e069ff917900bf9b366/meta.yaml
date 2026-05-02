@@ -1,0 +1,14 @@
+artifact_uri: file:D:\quant_project\QuantML-Qlib\mlruns/414801223336196739/6271c5cd839f4e069ff917900bf9b366/artifacts
+end_time: 1777639572742
+entry_point_name: ''
+experiment_id: '414801223336196739'
+lifecycle_stage: active
+run_id: 6271c5cd839f4e069ff917900bf9b366
+run_name: mlp_daily_cn_v1_25dcdcc1
+source_name: ''
+source_type: 4
+source_version: ''
+start_time: 1777639558630
+status: 4
+tags: []
+user_id: Administrator

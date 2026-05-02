@@ -1,0 +1,48 @@
+# 分钟频（1min）频率配置 — 占位模板
+# 当前数据目录（D:/qlib_data/qlib_data）尚无分钟频数据
+# 数据就绪后，需要：
+#   1. 确认 calendars/1min.txt 存在且时间范围正确
+#   2. 在 features/<code>/close.1min.bin 等文件存在
+#   3. 补充下方 feature_overrides 中的分钟级特征表达式
+#   4. 执行: python python/run_experiment.py --model mlp --freq minute
+
+freq_meta:
+  name: "minute"
+  freq_key: "1min"
+  # 数据就绪前设为 false，run_experiment.py 检查此标志
+  data_ready: false
+
+# 覆盖 base.yaml 中 dataset.kwargs.segments（按分钟数据实际范围填写）
+dataset_segments:
+  train: ["2024-01-01", "2025-06-30"]
+  valid: ["2025-07-01", "2025-12-31"]
+  test:  ["2026-01-01", "2026-04-28"]
+
+executor:
+  class: "SimulatorExecutor"
+  module_path: "qlib.backtest.executor"
+  kwargs:
+    time_per_step: "1min"
+    generate_portfolio_metrics: true
+
+backtest:
+  exchange_kwargs:
+    freq: "1min"
+    limit_threshold: 0.095
+    deal_price: "close"
+    open_cost: 0.0005
+    close_cost: 0.0015
+    min_cost: 5
+
+# 分钟级特征表达式（数据就绪后填充，替换 base.yaml 中的日级特征）
+# feature_overrides:
+#   exprs:
+#     - "$close/Ref($close,1)-1"           # 1-bar 收益率
+#     - "($close-$open)/$open"             # bar 内收益
+#     - "$volume/Mean($volume,20)"         # 相对成交量（20根bar均值）
+#     - ...
+#   names:
+#     - "RET1"
+#     - "KMID"
+#     - "VOL20"
+#     - ...

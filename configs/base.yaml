@@ -1,0 +1,82 @@
+# 公共基础配置：qlib 初始化、实验元数据、数据处理器、特征工程、交易策略
+# 由 run_experiment.py 与各 model/freq 配置深度合并后使用
+# 不含 model、executor、backtest、dataset.segments（由各子配置提供）
+
+qlib_init:
+  provider_uri: "D:/qlib_data/qlib_data"
+  region: cn
+
+experiment:
+  run_id: "experiment"
+  market: "all"
+  benchmark: "000905.SZ"
+  start_time: "2020-01-01"
+  end_time: "2026-04-28"
+  seed: 42
+  account: 100000000
+
+strategy:
+  class: "TopkDropoutStrategy"
+  module_path: "qlib.contrib.strategy"
+  kwargs:
+    topk: 50
+    n_drop: 5
+
+dataset:
+  class: "DatasetH"
+  module_path: "qlib.data.dataset"
+  kwargs:
+    handler:
+      class: "DataHandlerLP"
+      module_path: "qlib.data.dataset.handler"
+      kwargs:
+        start_time: "2020-01-01"
+        end_time: "2026-04-30"
+        instruments: "all"
+        infer_processors:
+          - class: Fillna
+            module_path: qlib.data.dataset.processor
+            kwargs:
+              fields_group: feature
+          - class: CSZScoreNorm
+            module_path: qlib.data.dataset.processor
+            kwargs:
+              fields_group: feature
+              method: robust
+          - class: Fillna
+            module_path: qlib.data.dataset.processor
+            kwargs:
+              fields_group: feature
+        learn_processors:
+          - class: DropnaLabel
+            module_path: qlib.data.dataset.processor
+          - class: Fillna
+            module_path: qlib.data.dataset.processor
+            kwargs:
+              fields_group: feature
+          - class: CSZScoreNorm
+            module_path: qlib.data.dataset.processor
+            kwargs:
+              fields_group: feature
+              method: robust
+          - class: Fillna
+            module_path: qlib.data.dataset.processor
+            kwargs:
+              fields_group: feature
+          - class: CSZScoreNorm
+            module_path: qlib.data.dataset.processor
+            kwargs:
+              fields_group: label
+              method: robust
+        data_loader:
+          class: QlibDataLoader
+          module_path: qlib.data.dataset.loader
+          kwargs:
+            config:
+              # feature 字段由 run_experiment.py 调用 features.build_feature_config()
+              # 根据 model_meta.feature_groups 动态注入，此处无需手动维护。
+              # 因子定义见 python/features/（momentum / volume / technical / fundamental）。
+              feature: []
+              label:
+                - - "Ref($close_qfq,-2)/Ref($close_qfq,-1)-1"
+                - - "LABEL0"

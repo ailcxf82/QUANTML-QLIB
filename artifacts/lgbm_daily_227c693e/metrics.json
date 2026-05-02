@@ -1,0 +1,20 @@
+{
+  "run_id": "lgbm_daily_227c693e",
+  "version": "v2",
+  "model": "lgbm",
+  "freq": "daily",
+  "timing_seconds": {
+    "dataset_build_sec": 119.58,
+    "train_sec": 14.56,
+    "backtest_sec": 21.84,
+    "total_sec": 157.79
+  },
+  "metrics": {
+    "annualized_return": 0.48640495360172925,
+    "max_drawdown": -0.6012959073252433,
+    "sharpe": NaN,
+    "information_ratio": 0.9687408808839907,
+    "turnover": 0.22717258882753388,
+    "win_rate": 0.6415094339622641
+  }
+}

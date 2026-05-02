@@ -1,0 +1,18 @@
+---
+description: 项目文件结构与导入规则（必须遵守）
+alwaysApply: true
+---
+
+# 文件结构与导入（必写）
+
+- 推荐目录结构：
+  - `python/`：数据处理、因子工程、模型训练、回测任务。
+  - `ts/`：策略服务、任务编排、可视化接口或执行端。
+  - `configs/`：实验配置、市场配置、交易成本配置。
+  - `artifacts/`：模型、信号、回测报告（按 run_id 隔离）。
+  - `tests/`：按 `python/` 与 `ts/` 镜像组织测试代码。
+- Python 禁止跨层相对导入（如 `from ...xxx import`）；统一绝对导入。
+- TypeScript 使用路径别名（如 `@core/*`、`@infra/*`），禁止深层相对路径地狱。
+- 任何跨语言契约（JSON Schema / protobuf / CSV 字段）必须放在 `contracts/` 并版本化。
+- Notebook 仅用于探索，稳定逻辑必须沉淀为可复用模块并可命令行执行。
+- 单文件职责单一：策略、执行、评估不得在同一文件混写。
