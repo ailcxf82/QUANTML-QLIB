@@ -1,6 +1,0 @@
-artifact_location: file:D:\quant_project\QuantML-Qlib\mlruns/414801223336196739
-creation_time: 1777639558043
-experiment_id: '414801223336196739'
-last_update_time: 1777639558043
-lifecycle_stage: active
-name: mlp_daily_backtest
