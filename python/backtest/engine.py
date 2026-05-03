@@ -38,6 +38,7 @@ from .execution_layer import ExecutionLayer
 from .market_layer import MarketLayer
 from .portfolio_layer import PortfolioLayer, PortfolioState
 from .analysis_layer import AnalysisLayer, PerformanceMetrics
+from .trade_layer import TradeLayer, TradeRecords
 
 
 @dataclass
@@ -52,6 +53,8 @@ class BacktestResult:
         signal_summary:  信号质量统计（IC/ICIR 等）
         report_df:       宽格式 DataFrame（含 return/bench/turnover/excess/cum_*）
         indicator_df:    Qlib indicator 指标（成交率等，可为空）
+        trades_df:       每笔订单明细（datetime/stock_id/direction/price/amount/...）
+        realized_pnl_df: FIFO 配对后的已实现盈亏明细
     """
     run_id: str
     portfolio_state: PortfolioState
@@ -59,6 +62,8 @@ class BacktestResult:
     signal_summary: SignalSummary
     report_df: pd.DataFrame
     indicator_df: pd.DataFrame
+    trades_df: pd.DataFrame
+    realized_pnl_df: pd.DataFrame
 
 
 class BacktestEngine:
@@ -78,6 +83,7 @@ class BacktestEngine:
         self._market_layer = MarketLayer()
         self._portfolio_layer = PortfolioLayer()
         self._analysis_layer = AnalysisLayer()
+        self._trade_layer = TradeLayer()
 
     def run(
         self,
@@ -149,6 +155,9 @@ class BacktestEngine:
         # 解析 indicator_dict（成交率等指标）
         indicator_df = self._parse_indicator_dict(indicator_dict)
 
+        # 提取每笔订单明细 + FIFO 已实现盈亏
+        trade_records: TradeRecords = self._trade_layer.extract(indicator_dict)
+
         # ──────────────────────────────────────────────────────────────────
         # [6] 分析层：计算指标 + 生成报告
         # ──────────────────────────────────────────────────────────────────
@@ -160,7 +169,8 @@ class BacktestEngine:
             )
             self._analysis_layer.save_html_report(
                 output_dir, run_id, model_name, freq_name,
-                metrics, signal_summary, portfolio_state
+                metrics, signal_summary, portfolio_state, indicator_df,
+                trade_records=trade_records,
             )
 
         self._analysis_layer.print_report(
@@ -170,7 +180,9 @@ class BacktestEngine:
             metrics=metrics,
             signal_summary=signal_summary,
             state=portfolio_state,
+            indicator_df=indicator_df,
             output_dir=output_dir,
+            trade_records=trade_records,
         )
 
         # 宽格式 report_df（供持久化）
@@ -183,6 +195,8 @@ class BacktestEngine:
             signal_summary=signal_summary,
             report_df=report_df,
             indicator_df=indicator_df,
+            trades_df=trade_records.trades,
+            realized_pnl_df=trade_records.realized_pnl,
         )
 
     def metrics_to_dict(self, result: BacktestResult) -> Dict[str, float]:

@@ -28,6 +28,7 @@ import pandas as pd
 
 from .portfolio_layer import PortfolioState
 from .signal_layer import SignalSummary
+from .trade_layer import TradeRecords
 
 
 # 年化换算因子（交易期数 → 年）
@@ -138,7 +139,9 @@ class AnalysisLayer:
         metrics: PerformanceMetrics,
         signal_summary: Optional[SignalSummary] = None,
         state: Optional[PortfolioState] = None,
+        indicator_df: Optional[pd.DataFrame] = None,
         output_dir: Optional[Path] = None,
+        trade_records: Optional[TradeRecords] = None,
     ) -> None:
         """在终端输出格式化回测报告（纯 Python，无第三方依赖）。"""
         W = 72
@@ -255,6 +258,31 @@ class AnalysisLayer:
         if state is not None:
             self._print_monthly_excess(state, W)
 
+        # ── 交易明细摘要（聚合统计） ─────────────────────────────────────
+        if trade_records is not None and not trade_records.trades.empty:
+            self._print_trade_summary(trade_records, W)
+            self._print_recent_trades(trade_records.trades, W, max_rows=8)
+            self._print_top_pnl(trade_records.realized_pnl, W, top_n=5)
+        elif state is not None:
+            # 退化模式：trade_layer 为空时，沿用旧版日级摘要 / 调仓兜底
+            trade_preview = self._build_trade_detail_preview(indicator_df, max_rows=5)
+            print(f"\n  ┌─ 交易明细摘要 {'─' * (W - 13)}┐")
+            if not trade_preview.empty:
+                print(f"  │  交易记录(日级): {len(indicator_df):<{W - 22}} │")
+                latest_date = str(trade_preview.iloc[0]["date"])
+                avg_deal_amt = trade_preview["deal_amount"].mean()
+                avg_trade_cnt = trade_preview["trade_count"].mean()
+                print(f"  │  最近记录日    : {latest_date:<{W - 22}} │")
+                print(f"  │  近5日平均成交额: {avg_deal_amt:>{12},.0f}{'':<{W - 35}} │")
+                print(f"  │  近5日平均成交笔: {avg_trade_cnt:>{12}.1f}{'':<{W - 35}} │")
+            else:
+                latest_date = str(state.turnover.index[-1].date())
+                avg_turnover = float(state.turnover.tail(5).mean())
+                print(f"  │  交易记录(日级): 暂无明细数据，使用调仓兜底{'':<{W - 32}} │")
+                print(f"  │  最近记录日    : {latest_date:<{W - 22}} │")
+                print(f"  │  近5日平均换手率: {avg_turnover*100:>11.2f}%{'':<{W - 35}} │")
+            print(f"  └{'─' * (W - 2)}┘")
+
         # ── 已生成文件 ────────────────────────────────────────────────────
         if output_dir is not None:
             charts_dir = output_dir / "charts"
@@ -266,14 +294,144 @@ class AnalysisLayer:
                 ("monthly_heatmap.png",   "月度超额收益热力图"),
                 ("rolling_metrics.png",   "滚动夏普 / 信息比率（63日窗口）"),
             ]:
-                exists = "✓" if (charts_dir / fn).exists() else "○"
+                # 使用 ASCII，避免 Windows GBK 控制台打印 ✓/○ 触发 UnicodeEncodeError
+                exists = "*" if (charts_dir / fn).exists() else "."
                 print(f"  │  {exists} {fn:<28} {desc:<{W - 36}} │")
-            html = output_dir / "report.html"
-            h_exists = "✓" if html.exists() else "○"
-            print(f"  │  {h_exists} {'report.html':<28} {'HTML 完整报告':<{W - 36}} │")
+            # report.html 此时已由 save_html_report 写入；
+            # indicator/trades/realized_pnl 的 parquet 由上层 persist_artifacts
+            # 在 print_report 之后才落盘。这里改用"逻辑预期标记"，
+            # 避免误报"文件不存在"。
+            indicator_ok = indicator_df is not None and not indicator_df.empty
+            has_trades = trade_records is not None and not trade_records.trades.empty
+            has_pnl = trade_records is not None and not trade_records.realized_pnl.empty
+            file_marks = [
+                ("report.html",          "HTML 完整报告",         (output_dir / "report.html").exists()),
+                ("indicator.parquet",    "日级成交聚合数据",         indicator_ok),
+                ("trades.parquet",       "每笔订单明细",           has_trades),
+                ("realized_pnl.parquet", "FIFO 已实现盈亏明细",     has_pnl),
+            ]
+            for fn, desc, will_exist in file_marks:
+                mark = "*" if will_exist else "."
+                print(f"  │  {mark} {fn:<28} {desc:<{W - 36}} │")
             print(f"  └{'─' * (W - 2)}┘")
 
         print("\n" + _hr() + "\n")
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # 交易明细打印
+    # ─────────────────────────────────────────────────────────────────────────
+
+    def _print_trade_summary(self, records: TradeRecords, W: int = 72) -> None:
+        """打印订单 + 已实现盈亏汇总统计。"""
+        trades = records.trades
+        pnl = records.realized_pnl
+
+        n_trades = len(trades)
+        n_buy = int((trades["direction"] == "BUY").sum())
+        n_sell = int((trades["direction"] == "SELL").sum())
+        n_stocks = int(trades["stock_id"].nunique())
+        gross_buy = float(trades.loc[trades["direction"] == "BUY", "value"].sum())
+        gross_sell = float(trades.loc[trades["direction"] == "SELL", "value"].sum())
+        total_cost = float(trades["cost"].sum())
+
+        n_close = len(pnl)
+        win_rate = float((pnl["net_pnl"] > 0).mean()) if n_close else float("nan")
+        avg_hold = float(pnl["holding_days"].mean()) if n_close else float("nan")
+        net_pnl_sum = float(pnl["net_pnl"].sum()) if n_close else 0.0
+        avg_ret = float(pnl["return_pct"].mean()) if n_close else float("nan")
+        market_breakdown = trades["market"].value_counts().to_dict() if n_trades else {}
+
+        def _row(name: str, value: str) -> str:
+            return f"  │  {name:<{W - 22}} {value:>{14}} │"
+
+        print(f"\n  ┌─ 交易明细汇总 {'─' * (W - 13)}┐")
+        print(_row("订单总数", f"{n_trades:,}"))
+        print(_row("买入笔数 / 卖出笔数", f"{n_buy:,} / {n_sell:,}"))
+        print(_row("涉及标的数", f"{n_stocks:,}"))
+        print(_row("买入总额（元）", f"{gross_buy:>14,.0f}"))
+        print(_row("卖出总额（元）", f"{gross_sell:>14,.0f}"))
+        print(_row("累计手续费（元）", f"{total_cost:>14,.0f}"))
+        print(f"  │{'─' * (W - 2)}│")
+        if n_close:
+            print(_row("已平仓笔数", f"{n_close:,}"))
+            print(_row("胜率（净盈利>0）", f"{win_rate * 100:>13.2f}%"))
+            print(_row("平均持仓天数", f"{avg_hold:>14.2f}"))
+            print(_row("累计已实现净盈亏（元）",
+                      f"{'+' if net_pnl_sum >= 0 else ''}{net_pnl_sum:>13,.0f}"))
+            print(_row("平均单笔收益率",
+                      f"{'+' if avg_ret >= 0 else ''}{avg_ret * 100:>13.2f}%"))
+        if market_breakdown:
+            top = sorted(market_breakdown.items(), key=lambda kv: -kv[1])[:4]
+            mkt_str = ", ".join(f"{k}:{v}" for k, v in top)
+            print(_row("板块分布(订单数)", mkt_str[:14] if len(mkt_str) > 14 else mkt_str))
+        print(f"  └{'─' * (W - 2)}┘")
+
+    def _print_recent_trades(
+        self, trades: pd.DataFrame, W: int = 72, max_rows: int = 8
+    ) -> None:
+        """打印最近 N 笔订单明细。"""
+        if trades.empty:
+            return
+        recent = trades.sort_values("datetime", ascending=False).head(max_rows)
+
+        col_w = {
+            "date": 11, "stock": 10, "mkt": 7, "dir": 4,
+            "amt": 9, "price": 9, "value": 11, "cost": 7,
+        }
+        header = (
+            f"  │  {'日期':<{col_w['date']}} {'股票代码':<{col_w['stock']}} "
+            f"{'板块':<{col_w['mkt']}} {'方向':<{col_w['dir']}} "
+            f"{'数量':>{col_w['amt']}} {'成交价':>{col_w['price']}} "
+            f"{'成交额':>{col_w['value']}} {'手续费':>{col_w['cost']}}"
+        )
+        print(f"\n  ┌─ 最近 {len(recent)} 笔订单明细 {'─' * (W - 23)}┐")
+        # 中文等宽控制台宽度难以精准对齐，这里直接打印
+        print(f"{header:<{W - 1}} │")
+        print(f"  │{'─' * (W - 2)}│")
+        for _, row in recent.iterrows():
+            line = (
+                f"  │  {str(row['datetime'].date()):<{col_w['date']}} "
+                f"{row['stock_id']:<{col_w['stock']}} "
+                f"{row['market']:<{col_w['mkt']}} "
+                f"{row['direction']:<{col_w['dir']}} "
+                f"{row['amount']:>{col_w['amt']},.0f} "
+                f"{row['price']:>{col_w['price']},.2f} "
+                f"{row['value']:>{col_w['value']},.0f} "
+                f"{row['cost']:>{col_w['cost']},.1f}"
+            )
+            print(f"{line:<{W - 1}} │")
+        print(f"  └{'─' * (W - 2)}┘")
+
+    def _print_top_pnl(self, pnl: pd.DataFrame, W: int = 72, top_n: int = 5) -> None:
+        """打印盈利与亏损最大的若干笔已实现交易。"""
+        if pnl.empty:
+            return
+        sorted_pnl = pnl.sort_values("net_pnl", ascending=False)
+        top = sorted_pnl.head(top_n)
+        bottom = sorted_pnl.tail(top_n).iloc[::-1]
+
+        def _emit(title: str, sub: pd.DataFrame) -> None:
+            print(f"\n  ┌─ {title} {'─' * (W - len(title) - 5)}┐")
+            print(
+                f"  │  {'平仓日':<11} {'股票':<10} {'持仓天':>5} "
+                f"{'买价':>8} {'卖价':>8} {'净盈亏':>11} {'收益率':>8}{'':<{W - 67}} │"
+            )
+            print(f"  │{'─' * (W - 2)}│")
+            for _, row in sub.iterrows():
+                line = (
+                    f"  │  {str(row['close_date'].date()):<11} "
+                    f"{row['stock_id']:<10} "
+                    f"{int(row['holding_days']):>5} "
+                    f"{row['buy_price']:>8,.2f} "
+                    f"{row['sell_price']:>8,.2f} "
+                    f"{('+' if row['net_pnl'] >= 0 else '')}{row['net_pnl']:>10,.0f} "
+                    f"{('+' if row['return_pct'] >= 0 else '')}{row['return_pct']*100:>7.2f}%"
+                )
+                print(f"{line:<{W - 1}} │")
+            print(f"  └{'─' * (W - 2)}┘")
+
+        _emit(f"盈利前 {len(top)} 笔交易", top)
+        _emit(f"亏损前 {len(bottom)} 笔交易", bottom)
 
     def _print_monthly_excess(self, state: PortfolioState, W: int = 72) -> None:
         """打印月度超额收益表格。"""
@@ -573,6 +731,8 @@ class AnalysisLayer:
         metrics: PerformanceMetrics,
         signal_summary: Optional[SignalSummary] = None,
         state: Optional[PortfolioState] = None,
+        indicator_df: Optional[pd.DataFrame] = None,
+        trade_records: Optional[TradeRecords] = None,
     ) -> None:
         """生成自包含 HTML 回测报告。"""
         charts_dir = output_dir / "charts"
@@ -658,6 +818,40 @@ class AnalysisLayer:
           </table>
         </div>"""
 
+        # 交易明细区块（来源: trade_records，订单级别 + 已实现盈亏）
+        trade_html = self._build_trade_html(trade_records)
+        if not trade_html and state is not None:
+            # 退化：trade_records 为空时，沿用调仓明细兜底
+            rebalance_preview = self._build_rebalance_preview(state, max_rows=30)
+            rebalance_rows = ""
+            for _, row in rebalance_preview.iterrows():
+                rebalance_rows += (
+                    "<tr>"
+                    f"<td>{row['date']}</td>"
+                    f"<td>{row['turnover']:.2%}</td>"
+                    f"<td>{row['strategy_ret']:+.2%}</td>"
+                    f"<td>{row['bench_ret']:+.2%}</td>"
+                    f"<td>{row['excess_ret']:+.2%}</td>"
+                    "</tr>"
+                )
+            trade_html = f"""
+    <div class="section">
+      <h2>交易明细（日级调仓摘要）</h2>
+      <p style="margin:0 0 12px;color:#666;font-size:12px;">
+        当前运行未返回订单明细，已降级展示最近 {len(rebalance_preview)} 日调仓与收益数据。
+      </p>
+      <table>
+        <tr>
+          <th>日期</th>
+          <th>换手率</th>
+          <th>策略收益</th>
+          <th>基准收益</th>
+          <th>超额收益</th>
+        </tr>
+        {rebalance_rows}
+      </table>
+    </div>"""
+
         html = f"""<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
@@ -708,6 +902,20 @@ class AnalysisLayer:
     /* 数值颜色 */
     .pos {{ color: #D94040; font-weight: 600; }}
     .neg {{ color: #2E9E4F; font-weight: 600; }}
+
+    /* 买卖方向标签 */
+    .buy-tag, .sell-tag {{
+      display: inline-block; padding: 1px 7px; border-radius: 4px;
+      font-size: 12px; font-weight: 600;
+    }}
+    .buy-tag  {{ background: #fff0ed; color: #D94040; }}
+    .sell-tag {{ background: #ecf7ee; color: #2E9E4F; }}
+
+    /* 代码字体 */
+    code {{
+      font-family: "SF Mono", Consolas, Monaco, monospace;
+      background: #f5f5f7; padding: 1px 5px; border-radius: 3px; font-size: 12px;
+    }}
 
     /* 图表网格 */
     .charts-grid {{
@@ -822,6 +1030,7 @@ class AnalysisLayer:
     </div>
 
     {ic_html}
+    {trade_html}
 
     <div class="section">
       <h2>可视化图表</h2>
@@ -836,6 +1045,215 @@ class AnalysisLayer:
 
         html_path = output_dir / "report.html"
         html_path.write_text(html, encoding="utf-8")
+
+    @staticmethod
+    def _build_trade_detail_preview(
+        indicator_df: Optional[pd.DataFrame],
+        max_rows: int = 30,
+    ) -> pd.DataFrame:
+        """将 indicator_df 标准化为交易明细预览表（按日期倒序）。"""
+        if indicator_df is None or indicator_df.empty:
+            return pd.DataFrame()
+
+        df = indicator_df.copy()
+
+        if isinstance(df.index, pd.MultiIndex):
+            date_level = df.index.get_level_values(0)
+            df["date"] = pd.to_datetime(date_level, errors="coerce")
+        elif isinstance(df.index, pd.DatetimeIndex):
+            df["date"] = pd.to_datetime(df.index, errors="coerce")
+        else:
+            df["date"] = pd.to_datetime(df.get("datetime"), errors="coerce")
+
+        def _safe_col(name: str, default: float = 0.0) -> pd.Series:
+            if name in df.columns:
+                return pd.to_numeric(df[name], errors="coerce").fillna(default)
+            return pd.Series(default, index=df.index, dtype=float)
+
+        preview = pd.DataFrame(
+            {
+                "date": df["date"].dt.date.astype(str),
+                "fill_ratio": _safe_col("ffr"),
+                "position_ratio": _safe_col("pos"),
+                "deal_amount": _safe_col("deal_amount"),
+                "position_value": _safe_col("value"),
+                "trade_count": _safe_col("count"),
+            }
+        ).dropna(subset=["date"])
+
+        if preview.empty:
+            return preview
+
+        preview = preview.sort_values("date", ascending=False).head(max_rows)
+        return preview.reset_index(drop=True)
+
+    @staticmethod
+    def _build_rebalance_preview(
+        state: PortfolioState,
+        max_rows: int = 30,
+    ) -> pd.DataFrame:
+        """基于 report_df 生成调仓明细预览（indicator 缺失时兜底）。"""
+        df = pd.DataFrame(
+            {
+                "date": pd.to_datetime(state.returns.index, errors="coerce").date.astype(str),
+                "turnover": pd.to_numeric(state.turnover, errors="coerce").fillna(0.0).values,
+                "strategy_ret": pd.to_numeric(state.returns, errors="coerce").fillna(0.0).values,
+                "bench_ret": pd.to_numeric(state.benchmark, errors="coerce").fillna(0.0).values,
+                "excess_ret": pd.to_numeric(state.excess_return, errors="coerce").fillna(0.0).values,
+            }
+        )
+        return df.sort_values("date", ascending=False).head(max_rows).reset_index(drop=True)
+
+    @staticmethod
+    def _build_trade_html(trade_records: Optional[TradeRecords]) -> str:
+        """渲染订单明细 + 已实现盈亏 + Top/Bottom 盈亏 三个 HTML 表。"""
+        if trade_records is None or trade_records.trades.empty:
+            return ""
+
+        trades = trade_records.trades.sort_values("datetime", ascending=False)
+        pnl = trade_records.realized_pnl
+        n_show = 100  # 表格最多展示 100 行
+
+        # 1) 订单明细（最近 100 笔）
+        trade_rows = ""
+        for _, row in trades.head(n_show).iterrows():
+            dir_cls = "buy-tag" if row["direction"] == "BUY" else "sell-tag"
+            dir_label = "买入" if row["direction"] == "BUY" else "卖出"
+            trade_rows += (
+                "<tr>"
+                f"<td>{str(row['datetime'].date())}</td>"
+                f"<td><code>{row['stock_id']}</code></td>"
+                f"<td>{row['market']}</td>"
+                f"<td><span class='{dir_cls}'>{dir_label}</span></td>"
+                f"<td>{row['amount']:,.0f}</td>"
+                f"<td>{row['price']:,.2f}</td>"
+                f"<td>{row['value']:,.0f}</td>"
+                f"<td>{row['cost']:,.2f}</td>"
+                f"<td>{row['fill_ratio']:.2f}</td>"
+                "</tr>"
+            )
+        trades_table = f"""
+    <div class="section">
+      <h2>订单明细（最近 {min(len(trades), n_show)} 笔，共 {len(trades)} 笔）</h2>
+      <p style="margin:0 0 12px;color:#666;font-size:12px;">
+        每笔订单含成交价、数量、金额、手续费、所属板块。完整明细见 trades.parquet。
+      </p>
+      <table>
+        <tr>
+          <th>日期</th>
+          <th>股票代码</th>
+          <th>板块</th>
+          <th>方向</th>
+          <th>数量（股）</th>
+          <th>成交价（元）</th>
+          <th>成交额（元）</th>
+          <th>手续费（元）</th>
+          <th>完成率</th>
+        </tr>
+        {trade_rows}
+      </table>
+    </div>"""
+
+        if pnl.empty:
+            return trades_table
+
+        # 2) FIFO 已实现盈亏（最近 100 笔）
+        pnl_recent = pnl.sort_values("close_date", ascending=False).head(n_show)
+        pnl_rows = ""
+        for _, row in pnl_recent.iterrows():
+            pnl_cls = "pos" if row["net_pnl"] >= 0 else "neg"
+            pnl_rows += (
+                "<tr>"
+                f"<td>{str(row['close_date'].date())}</td>"
+                f"<td>{str(row['open_date'].date())}</td>"
+                f"<td><code>{row['stock_id']}</code></td>"
+                f"<td>{row['market']}</td>"
+                f"<td>{int(row['holding_days'])}</td>"
+                f"<td>{row['amount']:,.0f}</td>"
+                f"<td>{row['buy_price']:,.2f}</td>"
+                f"<td>{row['sell_price']:,.2f}</td>"
+                f"<td>{row['trade_cost']:,.2f}</td>"
+                f"<td class='{pnl_cls}'>{('+' if row['net_pnl'] >= 0 else '')}{row['net_pnl']:,.0f}</td>"
+                f"<td class='{pnl_cls}'>{('+' if row['return_pct'] >= 0 else '')}{row['return_pct']*100:,.2f}%</td>"
+                "</tr>"
+            )
+        # 汇总
+        total_pnl = float(pnl["net_pnl"].sum())
+        n_close = len(pnl)
+        win_rate = float((pnl["net_pnl"] > 0).mean())
+        avg_hold = float(pnl["holding_days"].mean())
+        total_pnl_cls = "pos" if total_pnl >= 0 else "neg"
+        pnl_table = f"""
+    <div class="section">
+      <h2>已实现盈亏明细（FIFO 配对）</h2>
+      <p style="margin:0 0 12px;color:#666;font-size:12px;">
+        共 {n_close} 笔已平仓交易，胜率 {win_rate*100:.2f}%，平均持仓 {avg_hold:.1f} 天，
+        累计净盈亏 <span class="{total_pnl_cls}">{('+' if total_pnl >= 0 else '')}{total_pnl:,.0f}</span> 元。
+        完整数据见 realized_pnl.parquet。
+      </p>
+      <table>
+        <tr>
+          <th>平仓日</th>
+          <th>开仓日</th>
+          <th>股票代码</th>
+          <th>板块</th>
+          <th>持仓天数</th>
+          <th>数量（股）</th>
+          <th>买入价</th>
+          <th>卖出价</th>
+          <th>手续费</th>
+          <th>净盈亏（元）</th>
+          <th>收益率</th>
+        </tr>
+        {pnl_rows}
+      </table>
+    </div>"""
+
+        # 3) Top/Bottom 盈亏排行
+        top = pnl.sort_values("net_pnl", ascending=False).head(10)
+        bottom = pnl.sort_values("net_pnl", ascending=True).head(10)
+
+        def _ranking(title: str, sub: pd.DataFrame, color_cls: str) -> str:
+            if sub.empty:
+                return ""
+            rows_html = ""
+            for _, row in sub.iterrows():
+                rows_html += (
+                    "<tr>"
+                    f"<td>{str(row['close_date'].date())}</td>"
+                    f"<td><code>{row['stock_id']}</code></td>"
+                    f"<td>{row['market']}</td>"
+                    f"<td>{int(row['holding_days'])}</td>"
+                    f"<td>{row['buy_price']:,.2f}</td>"
+                    f"<td>{row['sell_price']:,.2f}</td>"
+                    f"<td class='{color_cls}'>{('+' if row['net_pnl'] >= 0 else '')}{row['net_pnl']:,.0f}</td>"
+                    f"<td class='{color_cls}'>{('+' if row['return_pct'] >= 0 else '')}{row['return_pct']*100:,.2f}%</td>"
+                    "</tr>"
+                )
+            return f"""
+      <h3 style="margin-top:18px;font-size:13px;">{title}</h3>
+      <table>
+        <tr>
+          <th>平仓日</th>
+          <th>股票</th>
+          <th>板块</th>
+          <th>持仓天数</th>
+          <th>买入价</th>
+          <th>卖出价</th>
+          <th>净盈亏</th>
+          <th>收益率</th>
+        </tr>
+        {rows_html}
+      </table>"""
+
+        ranking_table = f"""
+    <div class="section">
+      <h2>盈亏排行 Top / Bottom</h2>
+      {_ranking(f"盈利前 {len(top)} 笔", top, "pos")}
+      {_ranking(f"亏损前 {len(bottom)} 笔", bottom, "neg")}
+    </div>"""
+
+        return trades_table + pnl_table + ranking_table
 
 
 # ─────────────────────────────────────────────────────────────────────────────

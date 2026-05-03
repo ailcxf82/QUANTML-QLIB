@@ -1,6 +1,10 @@
 # LightGBM 模型配置（平铺特征，DatasetH）
 # 对应 qlib.contrib.model.gbdt.LGBModel
-# **kwargs 直接传给 lightgbm 的参数字典（objective 由 loss 自动设置）
+# **kwargs 直接传给 lightgbm train 的 params（objective 由 loss 注入 self.params）
+#
+# 处理器链沿用 base.yaml（含 CSZScoreNorm(feature)）：
+#   截面归一化让模型学到"特征排名"而非"特征绝对值"，跨年度可比，
+#   是控制 IC 标准差与跨周期稳定性的关键环节，不可省略。
 
 model_meta:
   name: "lgbm"
@@ -8,21 +12,31 @@ model_meta:
   freq_key: "1day"
   # 树模型对高维特征鲁棒，使用全部因子组（含基本面），为下一期扩展因子保留最大空间
   feature_groups: ~
+  # 仅在 LGBM 合并：追加 configs/combined_factors_df.json 中列出的 IC 筛选因子（run_experiment 专用）
+  combined_factors_json: "configs/combined_factors_df.json"
 
 model:
   class: "LGBModel"
   module_path: "qlib.contrib.model.gbdt"
   kwargs:
     loss: "mse"
-    early_stopping_rounds: 50
-    num_boost_round: 500
-    # 以下均为 lightgbm 原生参数，通过 **kwargs 注入
-    learning_rate: 0.05
-    num_leaves: 128
-    max_depth: 7
-    min_child_samples: 100
-    feature_fraction: 0.8
-    bagging_fraction: 0.8
+    early_stopping_rounds: 100
+    num_boost_round: 2000
+    learning_rate: 0.02
+    num_leaves: 63
+    max_depth: 6
+    min_child_samples: 500
+    min_split_gain: 0.001
+    feature_fraction: 0.7
+    feature_fraction_bynode: 0.85
+    bagging_fraction: 0.7
     bagging_freq: 5
-    reg_alpha: 0.0
-    reg_lambda: 0.001
+    reg_alpha: 0.1
+    reg_lambda: 1.0
+    seed: 42
+    feature_fraction_seed: 42
+    bagging_seed: 42
+    data_random_seed: 42
+    deterministic: true
+    force_col_wise: true
+    num_threads: -1

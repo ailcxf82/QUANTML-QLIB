@@ -9,7 +9,9 @@
     metrics.json             核心指标（含 IC/ICIR）+ 阶段耗时
     backtest_report.parquet  逐日组合收益序列（含 return/bench/turnover/excess/cum_*）
     signals.parquet          测试集预测分数
-    indicator.parquet        回测成交指标（如有）
+    indicator.parquet        日级成交聚合指标（如有）
+    trades.parquet           每笔订单明细（datetime/stock_id/direction/price/value/cost/...）
+    realized_pnl.parquet     FIFO 配对后的已实现盈亏明细
     charts/                  四张可视化图表
     report.html              HTML 完整回测报告
 
@@ -48,6 +50,7 @@ import pandas as pd
 import yaml
 
 from features import build_feature_config, feature_count, print_registry
+from features.combined_json_factors import merge_features_from_combined_json
 
 try:
     import qlib
@@ -241,6 +244,9 @@ def inject_feature_config(cfg: Dict[str, Any]) -> Dict[str, Any]:
       - null / 未设置 → 使用全部启用因子（含 RDAgent 生成因子）
       - list          → 仅使用指定分组的因子
 
+    若设置 model_meta.combined_factors_json（相对仓库根的路径），仅在此处追加 JSON 中列出的
+    额外因子（见 configs/combined_factors_df.json），其它模型配置不设置该键则不受影响。
+
     注入路径:
       cfg["dataset"]["kwargs"]["handler"]["kwargs"]["data_loader"]["kwargs"]["config"]["feature"]
     同步字段:
@@ -255,11 +261,19 @@ def inject_feature_config(cfg: Dict[str, Any]) -> Dict[str, Any]:
         groups=feature_groups,
         include_rdagent=True,
     )
+    combined_rel = cfg.get("model_meta", {}).get("combined_factors_json")
+    if combined_rel:
+        merge_features_from_combined_json(
+            exprs,
+            names,
+            WORKSPACE_ROOT / str(combined_rel),
+        )
     n_feat = len(names)
 
     LOGGER.info(
-        "feature_inject: groups=%s, n_feat=%d, names=%s",
+        "feature_inject: groups=%s, combined_json=%s, n_feat=%d, names=%s",
         feature_groups or "ALL",
+        combined_rel or None,
         n_feat,
         names,
         extra={"run_id": "init", "instrument": "ALL", "datetime": "", "signal": 0.0, "version": VERSION},
@@ -308,18 +322,25 @@ def run_backtest(
     pred_score: pd.Series,
     output_dir: Optional[Path] = None,
     label: Optional[pd.Series] = None,
-) -> Tuple[pd.DataFrame, pd.DataFrame, Dict[str, float]]:
+) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame, Dict[str, float]]:
     """
-    通过 BacktestEngine 执行分层回测，返回 (report_df, indicator_df, metrics_dict)。
+    通过 BacktestEngine 执行分层回测，返回:
+        (report_df, indicator_df, trades_df, realized_pnl_df, metrics_dict)
 
     BacktestEngine 内部按层执行：
       SignalLayer → StrategyLayer → ExecutionLayer → MarketLayer
-      → qlib.backtest → PortfolioLayer → AnalysisLayer
+      → qlib.backtest → PortfolioLayer → TradeLayer → AnalysisLayer
     """
     engine = BacktestEngine()
     result = engine.run(pred_score, cfg, output_dir=output_dir, label=label)
     metrics_dict = engine.metrics_to_dict(result)
-    return result.report_df, result.indicator_df, metrics_dict
+    return (
+        result.report_df,
+        result.indicator_df,
+        result.trades_df,
+        result.realized_pnl_df,
+        metrics_dict,
+    )
 
 
 # ─────────────────────────────────────────────────────────────────
@@ -349,6 +370,61 @@ def validate_pred_series(pred: pd.Series, run_id: str) -> None:
         )
 
 
+def filter_pred_to_universe(
+    pred: pd.Series,
+    universe: Optional[str],
+    start_time: str,
+    end_time: str,
+    run_id: str,
+) -> pd.Series:
+    """将 pred_score 限定到指定可投资 universe（如 csi500）。
+
+    若 universe 为空或为 "all"，原样返回；否则只保留 universe 中的股票，
+    用于"训练全市场、回测仅限可投资股票池"的解耦设计。
+
+    Args:
+        pred:        模型预测打分，MultiIndex(datetime, instrument)
+        universe:    qlib 可识别的 universe 名称（如 csi500、csi300）
+        start_time:  过滤起始日期（建议传测试集起始）
+        end_time:    过滤结束日期
+        run_id:      日志标识
+
+    Returns:
+        过滤后的 pred 序列
+    """
+    if not universe or universe.lower() == "all":
+        return pred
+
+    from qlib.data import D
+
+    inst_cfg = D.instruments(universe)
+    tradable = D.list_instruments(
+        inst_cfg, start_time=start_time, end_time=end_time, as_list=True
+    )
+    if not tradable:
+        LOGGER.warning(
+            "tradable_universe '%s' 在 [%s, %s] 区间为空，跳过过滤",
+            universe, start_time, end_time,
+            extra={"run_id": run_id, "instrument": "ALL", "datetime": "", "signal": 0.0, "version": VERSION},
+        )
+        return pred
+
+    tradable_set = set(tradable)
+    inst_level = pred.index.get_level_values(1)
+    mask = inst_level.isin(tradable_set)
+    filtered = pred[mask]
+
+    LOGGER.info(
+        "tradable_universe filter: %s, 保留 %d / %d 条记录（%.1f%%）",
+        universe,
+        int(mask.sum()),
+        len(pred),
+        100.0 * float(mask.mean()),
+        extra={"run_id": run_id, "instrument": "ALL", "datetime": "", "signal": 0.0, "version": VERSION},
+    )
+    return filtered
+
+
 # ─────────────────────────────────────────────────────────────────
 # 持久化
 # ─────────────────────────────────────────────────────────────────
@@ -360,6 +436,8 @@ def persist_artifacts(
     report_df: pd.DataFrame,
     indicator_df: pd.DataFrame,
     pred_score: pd.Series,
+    trades_df: Optional[pd.DataFrame] = None,
+    realized_pnl_df: Optional[pd.DataFrame] = None,
 ) -> None:
     """持久化回测产物：parquet 数据文件 + metrics.json 汇总。
 
@@ -370,6 +448,10 @@ def persist_artifacts(
     pred_score.to_frame("score").to_parquet(run_ctx.output_dir / "signals.parquet")
     if not indicator_df.empty:
         indicator_df.to_parquet(run_ctx.output_dir / "indicator.parquet")
+    if trades_df is not None and not trades_df.empty:
+        trades_df.to_parquet(run_ctx.output_dir / "trades.parquet")
+    if realized_pnl_df is not None and not realized_pnl_df.empty:
+        realized_pnl_df.to_parquet(run_ctx.output_dir / "realized_pnl.parquet")
 
     final_output = {
         "run_id": run_ctx.run_id,
@@ -476,6 +558,19 @@ def main() -> None:
         pred_score: pd.Series = model.predict(dataset, segment="test")
         validate_pred_series(pred_score, run_ctx.run_id)
 
+        # Step 2.6: 限定可投资 universe（仅在该股票池中选股，避免选到 ST/小盘/退市风险股）
+        tradable_universe = cfg.get("experiment", {}).get("tradable_universe")
+        if tradable_universe and tradable_universe.lower() != "all":
+            test_seg = cfg["dataset"]["kwargs"]["segments"]["test"]
+            pred_score = filter_pred_to_universe(
+                pred_score,
+                universe=tradable_universe,
+                start_time=test_seg[0],
+                end_time=test_seg[1],
+                run_id=run_ctx.run_id,
+            )
+            validate_pred_series(pred_score, run_ctx.run_id)
+
         # 尝试获取测试集标签（用于 IC/ICIR 计算）
         test_label: Optional[pd.Series] = None
         try:
@@ -487,7 +582,7 @@ def main() -> None:
 
         # Step 3: 回测（分层执行：SignalLayer → ... → AnalysisLayer）
         t2 = time.perf_counter()
-        report_df, indicator_df, metrics = run_backtest(
+        report_df, indicator_df, trades_df, realized_pnl_df, metrics = run_backtest(
             cfg,
             pred_score,
             output_dir=run_ctx.output_dir,
@@ -499,7 +594,10 @@ def main() -> None:
         run_ctx.timing["total_sec"] = round(time.perf_counter() - wall_start, 2)
 
         # Step 4: 持久化（图表/HTML 已由 BacktestEngine 写入，此处写数据文件）
-        persist_artifacts(run_ctx, cfg, metrics, report_df, indicator_df, pred_score)
+        persist_artifacts(
+            run_ctx, cfg, metrics, report_df, indicator_df, pred_score,
+            trades_df=trades_df, realized_pnl_df=realized_pnl_df,
+        )
 
         _log(run_ctx.run_id, "run_end")
 

@@ -1,0 +1,89 @@
+{
+  "created_at": "2026-04-29 08:53:39",
+  "script": "refresh_rdagent_parquet.py",
+  "mode": "strict",
+  "start": "2020-01-01",
+  "end": "2026-04-27",
+  "instruments": "csi500",
+  "ic_threshold": 0.02,
+  "max_nan_ratio": 0.5,
+  "max_factors": 50,
+  "oos_cutoff": "2024-12-31",
+  "ic_ir_threshold": 0.3,
+  "max_corr_vs_lgb": 0.7,
+  "max_corr_among_selected": 0.7,
+  "n_segments": 12,
+  "n_factors": 6,
+  "shape": [
+    720415,
+    6
+  ],
+  "factors": [
+    {
+      "name": "ValueMR_20D",
+      "ic": 0.158247,
+      "nan_ratio": 0.0855,
+      "ic_in_mean": 0.155653,
+      "ic_in_std": 0.023179,
+      "ic_in_ir": 6.7153,
+      "ic_oos": 0.152561,
+      "max_abs_corr_vs_lgb": 0.6967,
+      "argmax_lgb_col": "Ref($rsi_qfq_12, 1)"
+    },
+    {
+      "name": "volume_zscore_20d",
+      "ic": 0.104792,
+      "nan_ratio": 0.0177,
+      "ic_in_mean": 0.104403,
+      "ic_in_std": 0.023521,
+      "ic_in_ir": 4.4387,
+      "ic_oos": 0.104431,
+      "max_abs_corr_vs_lgb": 0.3619,
+      "argmax_lgb_col": "Ref($volume_ratio, 1)"
+    },
+    {
+      "name": "turnover_acceleration_5d",
+      "ic": 0.034879,
+      "nan_ratio": 0.009,
+      "ic_in_mean": 0.040194,
+      "ic_in_std": 0.017305,
+      "ic_in_ir": 2.3227,
+      "ic_oos": 0.013671,
+      "max_abs_corr_vs_lgb": 0.4266,
+      "argmax_lgb_col": "Ref($volume_ratio, 1)"
+    },
+    {
+      "name": "volume_ratio_ma_15d",
+      "ic": 0.034452,
+      "nan_ratio": 0.0143,
+      "ic_in_mean": 0.035993,
+      "ic_in_std": 0.0337,
+      "ic_in_ir": 1.0681,
+      "ic_oos": 0.021168,
+      "max_abs_corr_vs_lgb": 0.3844,
+      "argmax_lgb_col": "Ref($macd_qfq, 1)"
+    },
+    {
+      "name": "roe_momentum_60d",
+      "ic": 0.039711,
+      "nan_ratio": 0.0416,
+      "ic_in_mean": 0.033461,
+      "ic_in_std": 0.055115,
+      "ic_in_ir": 0.6071,
+      "ic_oos": 0.04973,
+      "max_abs_corr_vs_lgb": 0.5273,
+      "argmax_lgb_col": "Ref($roe, 1)"
+    },
+    {
+      "name": "quarterly_eps",
+      "ic": 0.021574,
+      "nan_ratio": 0.0,
+      "ic_in_mean": 0.019697,
+      "ic_in_std": 0.033305,
+      "ic_in_ir": 0.5914,
+      "ic_oos": 0.028735,
+      "max_abs_corr_vs_lgb": 0.648,
+      "argmax_lgb_col": "Ref($roe, 1)"
+    }
+  ]
+}

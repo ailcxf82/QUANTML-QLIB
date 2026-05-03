@@ -1,1 +1,4 @@
 "mlruns" 
+"artifacts"
+mlruns/
+artifacts/

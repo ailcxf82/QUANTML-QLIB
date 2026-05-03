@@ -6,9 +6,10 @@ freq_meta:
   freq_key: "1day"
 
 # 覆盖 base.yaml 中 dataset.kwargs.segments
+# valid 缩短为半年：节省样本给 train，使模型见过 2024 全年风格；与 LGBM 早停选轮配套
 dataset_segments:
-  train: ["2020-01-01", "2023-06-30"]
-  valid: ["2023-07-01", "2024-12-31"]
+  train: ["2020-01-01", "2024-06-30"]
+  valid: ["2024-07-01", "2024-12-31"]
   test:  ["2025-01-01", "2026-04-28"]
 
 executor:
@@ -21,8 +22,26 @@ executor:
 backtest:
   exchange_kwargs:
     freq: "day"
+    # ±9.5% 涨跌停保护，触达则当日不可成交（A股普通股 ±10%）
+    # 注：ST 股票实际是 ±5%，但当前 universe=csi500 不含 ST，故沿用 0.095
     limit_threshold: 0.095
     deal_price: "close"
-    open_cost: 0.0005
-    close_cost: 0.0015
+    # 真实成本结构（散户/中小机构口径，含通道滑点 + 冲击成本线性近似）：
+    #   买入 = 佣金 0.05% + 通道滑点 0.10% + 冲击成本 0.10% = 0.25%
+    #   卖出 = 佣金 0.05% + 印花税 0.10% + 通道滑点 0.10% + 冲击成本 0.10% = 0.35%
+    open_cost: 0.0025
+    close_cost: 0.0035
+    # 单笔最低费用 5 元
     min_cost: 5
+    # ⚠️ impact_cost 必须为 0：qlib 的二次项冲击成本公式
+    #     adj_cost_ratio = impact_cost * (trade_val / total_trade_val)^2
+    # 在国内 qlib 数据上有单位 bug —— $volume 字段已被归一化到亿股量级
+    # （如平安银行 2025-01-02 实际成交 1.38 亿股，qlib 存为 1.38），
+    # 但 _calc_trade_info_by_order 直接 `volume * price` 当成元用，
+    # 导致 (trade_val / total_trade_val)^2 被放大数百万倍，
+    # 实测：account=30 万、impact_cost=0.001 时 100% 订单被 deal_amount=0 拒绝。
+    # 已把 0.10% 的冲击成本线性合并到 open_cost/close_cost，效果近似且可解释。
+    impact_cost: 0
+    # 注：A股 100 股最小手数在 qlib adjusted_price 模式下无法强制启用
+    #   （日志会出现 "trade unit 100 is not supported in adjusted_price mode"）
+    #   收紧 universe 至 csi500 后单票均价较高，该误差影响相对有限

@@ -8,19 +8,33 @@ qlib_init:
 
 experiment:
   run_id: "experiment"
+  # 训练 universe 仍用 "all"（qlib 数据集 csi500 是当前快照，训练期无数据，
+  # 直接把训练集设为 csi500 会得到空 dataset）
   market: "all"
   benchmark: "000905.SZ"
   start_time: "2020-01-01"
   end_time: "2026-04-28"
   seed: 42
-  account: 100000000
+  account: 300000
+  # 回测可投资股票池：只在 csi500 中选股，避免选到 ST/小盘/退市风险股
+  # 由 run_experiment.py 在 pred_score 生成后做掩膜过滤
+  tradable_universe: "csi500"
 
 strategy:
   class: "TopkDropoutStrategy"
   module_path: "qlib.contrib.strategy"
   kwargs:
-    topk: 50
-    n_drop: 5
+    # 30 万账户散户口径：
+    #   topk=5 → 单票预算约 5.7 万元（cash * 0.95 / 5）
+    #   单票权重 19%（明显高于机构 5% 上限，但散户场景常见且可承受）
+    #   再小账户（10 万）建议 topk=3
+    topk: 8
+    # 每期最多换出 1 只 → 平均持有期约 5 个交易日，月换手 ≈ 100%
+    n_drop: 2
+    # 风控：只在可交易标的中下单（自动跳过停牌、当日涨跌停的票）
+    only_tradable: true
+    # 风控：若全部候选股触及涨跌停，直接放弃当日调仓
+    forbid_all_trade_at_limit: true
 
 dataset:
   class: "DatasetH"
@@ -32,6 +46,7 @@ dataset:
       kwargs:
         start_time: "2020-01-01"
         end_time: "2026-04-30"
+        # 训练用全市场（保留特征丰富度），回测时通过 tradable_universe 过滤
         instruments: "all"
         infer_processors:
           - class: Fillna
