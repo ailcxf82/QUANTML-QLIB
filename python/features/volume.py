@@ -35,5 +35,11 @@ ALPHAS: list[AlphaDef] = [
         expr="$net_amount",
         group="volume",
         description="资金净流入金额，正值为净买入，负值为净卖出",
+        # 禁用原因（audit_features.py 实测）：
+        #   train(2020-01 ~ 2024-06) 段 coverage 仅 18.9%，A 股早期资金流字段
+        #   缺失严重；valid/test 段已 95-99%。一刀切 Fillna(0) 会把"缺失"和
+        #   "净流入为 0"混淆，反而干扰其他股票的截面排名。重新启用前需补完整
+        #   历史数据或换为按日 Rank 的鲁棒变换。
+        enabled=False,
     ),
 ]

@@ -26,6 +26,13 @@ _EXPR_BY_JSON_NAME: dict[str, str] = {
     "quarterly_eps": "$eps",
 }
 
+# 已知在当前 qlib provider 上覆盖率严重不足、必须在合并阶段直接跳过的因子名。
+#   - quarterly_eps: provider 中 $eps 字段全 NaN（audit_features.py 实测 train/valid/test 三段
+#     coverage=0.000）。重新启用前需补完整 EPS 历史数据，并通过 IC 筛选脚本重新生成 JSON。
+_DISABLED_NAMES: frozenset[str] = frozenset({
+    "quarterly_eps",
+})
+
 
 def merge_features_from_combined_json(
     exprs: list[str],
@@ -66,6 +73,9 @@ def merge_features_from_combined_json(
             continue
         name = raw_name.strip()
         if name in existing:
+            continue
+        if name in _DISABLED_NAMES:
+            # 已知数据覆盖率极低/字段缺失的因子静默跳过，不写入特征列表。
             continue
         expr = _EXPR_BY_JSON_NAME.get(name)
         if expr is None:

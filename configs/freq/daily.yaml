@@ -5,12 +5,29 @@ freq_meta:
   name: "daily"
   freq_key: "1day"
 
-# 覆盖 base.yaml 中 dataset.kwargs.segments
+# 覆盖 base.yaml 中 dataset.kwargs.segments（rolling.enabled=false 时使用）
 # valid 缩短为半年：节省样本给 train，使模型见过 2024 全年风格；与 LGBM 早停选轮配套
 dataset_segments:
   train: ["2020-01-01", "2024-06-30"]
   valid: ["2024-07-01", "2024-12-31"]
   test:  ["2025-01-01", "2026-04-28"]
+
+# 滚动训练（rolling fit）配置：把 dataset_segments.test 区间按 step_months 切片，
+# 每片独立重训一次模型，使训练集贴近预测时点，缓解风格漂移导致的 IC 衰减。
+# 与一刀切训练相比，dataset 仅 setup 一次（CSZScoreNorm 是按截面归一化、不需 refit），
+# 仅模型重训，单段开销 ≈ train_sec（约 25s × 段数）。
+#
+# 调试建议：
+#   step_months = 12 / 6 / 3 / 1 控制重训频率与回测段数
+#   train_years = 1.5 / 2 / 3 / 5 控制每段训练窗口长度
+#   valid_months = 3 / 6 控制验证窗口长度（与 LGBM early_stopping 配套）
+rolling:
+  # P0 验证阶段先关闭，跑单切分获得"83 列 + CSRankNorm" 的对照基线；
+  # 跑通后再开 true 验证滚动训练在新因子集下是否仍劣于一刀切。
+  enabled: false
+  train_years: 3.0       # 训练窗口长度（含 valid 之前的 train 段，单位：年）
+  valid_months: 6        # valid 紧贴当前预测段之前
+  step_months: 3         # 重训步长 / 单段预测窗口（月）
 
 executor:
   class: "SimulatorExecutor"

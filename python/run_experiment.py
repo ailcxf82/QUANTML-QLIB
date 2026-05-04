@@ -51,6 +51,7 @@ import yaml
 
 from features import build_feature_config, feature_count, print_registry
 from features.combined_json_factors import merge_features_from_combined_json
+from features.market_state import MARKET_INDEX, MARKET_STATE_NAMES
 
 try:
     import qlib
@@ -247,43 +248,91 @@ def inject_feature_config(cfg: Dict[str, Any]) -> Dict[str, Any]:
     若设置 model_meta.combined_factors_json（相对仓库根的路径），仅在此处追加 JSON 中列出的
     额外因子（见 configs/combined_factors_df.json），其它模型配置不设置该键则不受影响。
 
+    若 model_meta.use_market_state=true（默认 true），把原始 ``QlibDataLoader``（个股因子）
+    包装为 ``NestedDataLoader([QlibDataLoader, MarketStateDataLoader])``，将 000905.SH 指数
+    级市场状态因子（MKT_RET1/RET5/RET20/VOL5/VOL20/DD20/TURN）按 datetime 广播到每只股票同
+    日同值。模型 input_dim / d_feat 同步加上市场状态因子数量。
+
     注入路径:
-      cfg["dataset"]["kwargs"]["handler"]["kwargs"]["data_loader"]["kwargs"]["config"]["feature"]
+      cfg["dataset"]["kwargs"]["handler"]["kwargs"]["data_loader"]
     同步字段:
       cfg["model"]["kwargs"]["input_dim"]  （MLP 等平铺模型）
       cfg["model"]["kwargs"]["pt_model_kwargs"]["input_dim"]  （DNNModelPytorch）
       cfg["model"]["kwargs"]["d_feat"]     （LSTM/GRU/Transformer 时序模型）
     """
     cfg = copy.deepcopy(cfg)
-    feature_groups: Optional[List[str]] = cfg.get("model_meta", {}).get("feature_groups")
+    model_meta = cfg.get("model_meta", {})
+    feature_groups: Optional[List[str]] = model_meta.get("feature_groups")
 
     exprs, names = build_feature_config(
         groups=feature_groups,
         include_rdagent=True,
     )
-    combined_rel = cfg.get("model_meta", {}).get("combined_factors_json")
+    combined_rel = model_meta.get("combined_factors_json")
     if combined_rel:
         merge_features_from_combined_json(
             exprs,
             names,
             WORKSPACE_ROOT / str(combined_rel),
         )
-    n_feat = len(names)
+
+    # 实测：在当前个股因子集 + CSZScoreNorm 截面归一化的 pipeline 下，
+    # 市场状态因子被截面归一化设计上"洗掉"，且个股因子的截面分布已隐含市场状态，
+    # LGBM 几乎不使用这些特征（best iteration 仅 +18 轮，valid l2 改善 < 0.1‰），
+    # 反而引入维度噪声使 IR 微降。因此默认关闭，保留代码作为未来 rolling fit /
+    # 行业中性化等改造时的可选扩展点。需要时在 model_meta 里显式打开。
+    use_market_state: bool = bool(model_meta.get("use_market_state", False))
+    n_individual = len(names)
+    n_market = len(MARKET_STATE_NAMES) if use_market_state else 0
+    n_feat = n_individual + n_market
 
     LOGGER.info(
-        "feature_inject: groups=%s, combined_json=%s, n_feat=%d, names=%s",
+        "feature_inject: groups=%s, combined_json=%s, n_individual=%d, n_market=%d, n_feat=%d",
         feature_groups or "ALL",
         combined_rel or None,
+        n_individual,
+        n_market,
         n_feat,
-        names,
         extra={"run_id": "init", "instrument": "ALL", "datetime": "", "signal": 0.0, "version": VERSION},
     )
 
-    # 注入 data_loader.config.feature
-    dl_cfg = (
-        cfg["dataset"]["kwargs"]["handler"]["kwargs"]["data_loader"]["kwargs"]["config"]
-    )
-    dl_cfg["feature"] = [exprs, names]
+    handler_kwargs = cfg["dataset"]["kwargs"]["handler"]["kwargs"]
+    qlib_loader_cfg: Dict[str, Any] = handler_kwargs["data_loader"]
+    qlib_loader_cfg.setdefault("kwargs", {}).setdefault("config", {})["feature"] = [exprs, names]
+
+    if use_market_state:
+        # 把原个股因子 loader 与 MarketStateDataLoader 组合：
+        #   - 个股因子走 fields_group="feature"，会被 CSZScoreNorm(feature) 截面归一化；
+        #   - 市场状态因子走 fields_group="feature_mkt"，跳过截面归一化；
+        #   - 末尾追加 MarketStateMergeProcessor 把 feature_mkt 重命名合并回 feature，
+        #     让 LGBModel 等下游通过 df["feature"] 自动拿到市场状态因子。
+        handler_kwargs["data_loader"] = {
+            "class": "NestedDataLoader",
+            "module_path": "qlib.data.dataset.loader",
+            "kwargs": {
+                "dataloader_l": [
+                    qlib_loader_cfg,
+                    {
+                        "class": "MarketStateDataLoader",
+                        "module_path": "features.market_state",
+                        "kwargs": {
+                            "index_code": MARKET_INDEX,
+                            "freq": "day",
+                            "fields_group": "feature_mkt",
+                        },
+                    },
+                ],
+                "join": "left",
+            },
+        }
+        merge_proc = {
+            "class": "MarketStateMergeProcessor",
+            "module_path": "features.market_state",
+            "kwargs": {"src_group": "feature_mkt", "dst_group": "feature"},
+        }
+        for proc_key in ("infer_processors", "learn_processors"):
+            proc_list = handler_kwargs.setdefault(proc_key, [])
+            proc_list.append(merge_proc)
 
     # 同步模型维度参数（消除 input_dim / d_feat 硬编码）
     model_kwargs: Dict[str, Any] = cfg.get("model", {}).get("kwargs", {})
@@ -311,6 +360,184 @@ def train_model(cfg: Dict[str, Any], dataset: DatasetH) -> Model:
     model: Model = init_instance_by_config(cfg["model"])
     model.fit(dataset)
     return model
+
+
+# ─────────────────────────────────────────────────────────────────
+# 滚动训练（rolling fit）
+# ─────────────────────────────────────────────────────────────────
+
+def _build_rolling_segments(
+    test_start: str,
+    test_end: str,
+    train_years: float,
+    valid_months: int,
+    step_months: int,
+) -> List[Dict[str, List[str]]]:
+    """把 [test_start, test_end] 按 step_months 切成多段，每段返回 train/valid/test 三个时间窗。
+
+    时间窗对齐规则（紧贴关系，无重叠）::
+
+        |<──── train_years ────>|<── valid_months ──>|<── step_months ──>|
+        train_start          train_end          valid_end             chunk_end
+
+    Args:
+        test_start, test_end: 测试区间（含两端）
+        train_years:  训练窗口长度（年），支持浮点（如 1.5、2.5）
+        valid_months: 验证窗口长度（月）
+        step_months:  滚动步长 / 单段预测窗口（月）
+
+    Returns:
+        每段 dict（{"train": [s, e], "valid": [s, e], "test": [s, e]}），按时间升序。
+    """
+    if train_years <= 0 or valid_months <= 0 or step_months <= 0:
+        raise ValueError(
+            f"rolling 配置非法: train_years={train_years}, "
+            f"valid_months={valid_months}, step_months={step_months}（必须为正数）"
+        )
+
+    train_months = int(round(train_years * 12))
+    chunks: List[Dict[str, List[str]]] = []
+    cur = pd.Timestamp(test_start)
+    end = pd.Timestamp(test_end)
+
+    while cur <= end:
+        chunk_end = min(
+            cur + pd.DateOffset(months=step_months) - pd.DateOffset(days=1),
+            end,
+        )
+        valid_end = cur - pd.DateOffset(days=1)
+        valid_start = valid_end - pd.DateOffset(months=valid_months) + pd.DateOffset(days=1)
+        train_end = valid_start - pd.DateOffset(days=1)
+        train_start = train_end - pd.DateOffset(months=train_months) + pd.DateOffset(days=1)
+
+        chunks.append({
+            "train": [train_start.strftime("%Y-%m-%d"), train_end.strftime("%Y-%m-%d")],
+            "valid": [valid_start.strftime("%Y-%m-%d"), valid_end.strftime("%Y-%m-%d")],
+            "test":  [cur.strftime("%Y-%m-%d"), chunk_end.strftime("%Y-%m-%d")],
+        })
+        cur = chunk_end + pd.DateOffset(days=1)
+
+    return chunks
+
+
+def _ensure_handler_covers(
+    cfg: Dict[str, Any],
+    earliest: str,
+    latest: str,
+) -> Dict[str, Any]:
+    """确保 dataset.handler 的时间窗覆盖 [earliest, latest]，否则就地放宽。
+
+    Handler 在初次 setup_data 时会按 ``start_time/end_time`` 缓存全部 feature/label，
+    若滚动训练所需的最早 train_start 早于该窗口，将无法切到训练数据。
+    """
+    cfg = copy.deepcopy(cfg)
+    h_kwargs = cfg["dataset"]["kwargs"]["handler"]["kwargs"]
+    cur_start = pd.Timestamp(h_kwargs.get("start_time", earliest))
+    cur_end = pd.Timestamp(h_kwargs.get("end_time", latest))
+    new_start = min(cur_start, pd.Timestamp(earliest))
+    new_end = max(cur_end, pd.Timestamp(latest))
+    h_kwargs["start_time"] = new_start.strftime("%Y-%m-%d")
+    h_kwargs["end_time"] = new_end.strftime("%Y-%m-%d")
+    return cfg
+
+
+def run_rolling_fit(
+    cfg: Dict[str, Any],
+    run_ctx: "RunContext",
+) -> Tuple[pd.Series, DatasetH, Dict[str, Any]]:
+    """滚动训练主流程：每段独立重训模型，拼接所有段预测。
+
+    设计要点：
+      1. **dataset 只 setup 一次**：handler 时间窗扩到覆盖所有 chunks 的最早 train_start
+         到 test_end，CSZScoreNorm 等截面处理器无需 refit；
+      2. **每段重新初始化模型**：避免 LGBM/PyTorch 模型残留上一段状态；
+      3. **predict 仅取 chunk 内时间**：dataset.segments["test"] 已被改为该 chunk 的
+         test 段，因此 ``model.predict(dataset, segment="test")`` 自动只返回该段；
+      4. **拼接后整体走 backtest**：与一刀切训练完全等价，下游 BacktestEngine 不需变更。
+
+    Returns:
+        (pred_score, dataset, last_cfg) — 拼接后的预测、setup 完成的 dataset、
+        最后一段使用的 cfg（含其 segments，便于持久化）。
+    """
+    rolling_cfg: Dict[str, Any] = cfg.get("rolling", {})
+    test_start, test_end = cfg["dataset"]["kwargs"]["segments"]["test"]
+
+    chunks = _build_rolling_segments(
+        test_start=test_start,
+        test_end=test_end,
+        train_years=float(rolling_cfg.get("train_years", 3.0)),
+        valid_months=int(rolling_cfg.get("valid_months", 6)),
+        step_months=int(rolling_cfg.get("step_months", 3)),
+    )
+
+    earliest_train_start = chunks[0]["train"][0]
+    latest_test_end = chunks[-1]["test"][1]
+    cfg = _ensure_handler_covers(cfg, earliest_train_start, latest_test_end)
+
+    # 用第一段 segments 初始化 dataset（之后逐段覆盖）
+    cfg["dataset"]["kwargs"]["segments"] = copy.deepcopy(chunks[0])
+
+    _log(
+        run_ctx.run_id,
+        f"rolling: chunks={len(chunks)}, train_years={rolling_cfg.get('train_years')}, "
+        f"valid_months={rolling_cfg.get('valid_months')}, "
+        f"step_months={rolling_cfg.get('step_months')}, "
+        f"handler_window=[{cfg['dataset']['kwargs']['handler']['kwargs']['start_time']}, "
+        f"{cfg['dataset']['kwargs']['handler']['kwargs']['end_time']}]",
+    )
+    for i, ch in enumerate(chunks):
+        _log(
+            run_ctx.run_id,
+            f"  chunk[{i}] train={ch['train']} valid={ch['valid']} test={ch['test']}",
+        )
+
+    t0 = time.perf_counter()
+    dataset = build_dataset(cfg)
+    run_ctx.timing["dataset_build_sec"] = round(time.perf_counter() - t0, 2)
+    _log(run_ctx.run_id, f"dataset_ready [{run_ctx.timing['dataset_build_sec']}s]")
+
+    pred_segments: List[pd.Series] = []
+    train_secs: List[float] = []
+    for i, chunk in enumerate(chunks):
+        dataset.segments = copy.deepcopy(chunk)
+        t1 = time.perf_counter()
+        model: Model = init_instance_by_config(cfg["model"])
+        model.fit(dataset)
+        elapsed = round(time.perf_counter() - t1, 2)
+        train_secs.append(elapsed)
+
+        pred_chunk: pd.Series = model.predict(dataset, segment="test")
+        if pred_chunk.empty:
+            LOGGER.warning(
+                "rolling chunk[%d] predict 返回空序列，区间=%s，已跳过",
+                i, chunk["test"],
+                extra={"run_id": run_ctx.run_id, "instrument": "ALL", "datetime": "",
+                       "signal": 0.0, "version": VERSION},
+            )
+            continue
+        pred_segments.append(pred_chunk)
+        _log(
+            run_ctx.run_id,
+            f"chunk[{i}] test={chunk['test']} train_sec={elapsed}s pred_size={len(pred_chunk)}",
+        )
+
+    if not pred_segments:
+        raise RuntimeError("rolling 流程没有产生任何预测，请检查 rolling 配置与数据可用区间")
+
+    pred_score = pd.concat(pred_segments).sort_index()
+    # 防御性去重（相邻 chunk 边界若有日期重叠时保留前者）
+    pred_score = pred_score[~pred_score.index.duplicated(keep="first")]
+
+    run_ctx.timing["train_sec"] = round(sum(train_secs), 2)
+    run_ctx.timing["rolling_chunks"] = len(chunks)
+    _log(run_ctx.run_id,
+         f"rolling_done chunks={len(chunks)} total_train_sec={run_ctx.timing['train_sec']}s")
+
+    # 让下游 backtest / label 加载使用整体测试区间
+    cfg["dataset"]["kwargs"]["segments"]["test"] = [test_start, test_end]
+    dataset.segments["test"] = [test_start, test_end]
+
+    return pred_score, dataset, cfg
 
 
 # ─────────────────────────────────────────────────────────────────
@@ -539,23 +766,29 @@ def main() -> None:
 
     experiment_name = f"{model_name}_{freq_name}_backtest"
 
+    rolling_cfg: Dict[str, Any] = cfg.get("rolling") or {}
+    rolling_enabled: bool = bool(rolling_cfg.get("enabled", False))
+
     with R.start(experiment_name=experiment_name, recorder_name=run_ctx.run_id):
-        _log(run_ctx.run_id, "run_start")
+        _log(run_ctx.run_id, f"run_start (rolling={'on' if rolling_enabled else 'off'})")
 
-        # Step 1: 构建数据集
-        t0 = time.perf_counter()
-        dataset = build_dataset(cfg)
-        run_ctx.timing["dataset_build_sec"] = round(time.perf_counter() - t0, 2)
-        _log(run_ctx.run_id, f"dataset_ready [{run_ctx.timing['dataset_build_sec']}s]")
+        if rolling_enabled:
+            # 滚动训练分支：dataset setup 一次，逐段重训 & 预测，拼接结果
+            pred_score, dataset, cfg = run_rolling_fit(cfg, run_ctx)
+        else:
+            # 一刀切分支：原有流程不变
+            t0 = time.perf_counter()
+            dataset = build_dataset(cfg)
+            run_ctx.timing["dataset_build_sec"] = round(time.perf_counter() - t0, 2)
+            _log(run_ctx.run_id, f"dataset_ready [{run_ctx.timing['dataset_build_sec']}s]")
 
-        # Step 2: 训练模型
-        t1 = time.perf_counter()
-        model = train_model(cfg, dataset)
-        run_ctx.timing["train_sec"] = round(time.perf_counter() - t1, 2)
-        _log(run_ctx.run_id, f"train_done [{run_ctx.timing['train_sec']}s]")
+            t1 = time.perf_counter()
+            model = train_model(cfg, dataset)
+            run_ctx.timing["train_sec"] = round(time.perf_counter() - t1, 2)
+            _log(run_ctx.run_id, f"train_done [{run_ctx.timing['train_sec']}s]")
 
-        # Step 2.5: 推理并校验
-        pred_score: pd.Series = model.predict(dataset, segment="test")
+            pred_score = model.predict(dataset, segment="test")
+
         validate_pred_series(pred_score, run_ctx.run_id)
 
         # Step 2.6: 限定可投资 universe（仅在该股票池中选股，避免选到 ST/小盘/退市风险股）

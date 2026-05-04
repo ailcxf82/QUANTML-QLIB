@@ -2,3 +2,4 @@
 "artifacts"
 mlruns/
 artifacts/
+__pycache__/

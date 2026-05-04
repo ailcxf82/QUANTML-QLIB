@@ -20,19 +20,25 @@ model:
   module_path: "qlib.contrib.model.gbdt"
   kwargs:
     loss: "mse"
-    early_stopping_rounds: 100
-    num_boost_round: 2000
+    # R1 容量收紧：因子数从 26 → 78（剔除 5 个 train↔test 反转后），
+    # 模型容量随之降一档，避免 OOS 弱因子被组合放大。
+    # 调整依据（audit_p0_diagnosis.py 实测）：
+    #   - 单因子 |test ICIR| 中位数：新 1.28 vs 老 1.38（基本同档）
+    #   - 但 83 列 + 旧超参时 train_sec 23s → 178s（树数 ~5x），月度超额
+    #     在 8 个月跌 >2pp，集中在风格切换月（2025-02 -20.8pp 等）。
+    early_stopping_rounds: 80
+    num_boost_round: 800
     learning_rate: 0.02
-    num_leaves: 63
+    num_leaves: 31
     max_depth: 6
-    min_child_samples: 500
-    min_split_gain: 0.001
+    min_child_samples: 1000
+    min_split_gain: 0.005
     feature_fraction: 0.7
     feature_fraction_bynode: 0.85
     bagging_fraction: 0.7
     bagging_freq: 5
-    reg_alpha: 0.1
-    reg_lambda: 1.0
+    reg_alpha: 1.0
+    reg_lambda: 10.0
     seed: 42
     feature_fraction_seed: 42
     bagging_seed: 42

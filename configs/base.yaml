@@ -78,6 +78,12 @@ dataset:
             module_path: qlib.data.dataset.processor
             kwargs:
               fields_group: feature
+          # C1 对照实验：label 撤回 CSZScoreNorm(robust)，与 4d43003f 同口径。
+          #   - 保留 78 列因子集 + R1 紧容量 LGBM；
+          #   - 单变量隔离"label 处理器"对 IR / 年化的独立影响。
+          #   CSRankNorm（截面排名归一化）虽对极端日鲁棒，但会把头部分离度压缩，
+          #   在 TopK=8 的离散选股策略下可能损失"果断买入头部"的优势。本次
+          #   实验用于验证这一假设。
           - class: CSZScoreNorm
             module_path: qlib.data.dataset.processor
             kwargs:

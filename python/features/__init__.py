@@ -28,13 +28,32 @@ from pathlib import Path
 from typing import Optional
 
 from .base import AlphaDef, VALID_GROUPS
-from . import fundamental, momentum, technical, volume
+from . import (
+    corr,
+    count,
+    fundamental,
+    ma_window,
+    momentum,
+    momentum_ext,
+    regression,
+    technical,
+    volatility,
+    volume,
+)
 
 # ── 内置因子注册表（顺序即 QlibDataLoader 中的列顺序）────────────────
+# 按业务组别聚合：momentum → volume → technical → fundamental，
+# 每组内先现有原子因子、后新增的多窗口因子。
 _BUILTIN_ALPHAS: list[AlphaDef] = (
     momentum.ALPHAS
+    + momentum_ext.ALPHAS
     + volume.ALPHAS
+    + volatility.ALPHAS
     + technical.ALPHAS
+    + ma_window.ALPHAS
+    + corr.ALPHAS
+    + regression.ALPHAS
+    + count.ALPHAS
     + fundamental.ALPHAS
 )
 
