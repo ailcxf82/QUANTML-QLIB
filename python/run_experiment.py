@@ -362,6 +362,110 @@ def train_model(cfg: Dict[str, Any], dataset: DatasetH) -> Model:
     return model
 
 
+def _override_model_seeds(model_cfg: Dict[str, Any], seed: int) -> Dict[str, Any]:
+    """生成把所有随机种子统一为 `seed` 的模型配置副本（用于 ensemble）。
+
+    覆盖字段（LGBM 完整随机源）:
+      - seed: tree split / sampling 主种子
+      - feature_fraction_seed: 列子采样
+      - bagging_seed: 行子采样
+      - data_random_seed: 数据 reorder
+    其它非随机字段保持不变。
+    """
+    new_cfg = copy.deepcopy(model_cfg)
+    kwargs: Dict[str, Any] = new_cfg.setdefault("kwargs", {})
+    for key in ("seed", "feature_fraction_seed", "bagging_seed", "data_random_seed"):
+        kwargs[key] = int(seed)
+    return new_cfg
+
+
+def train_predict_ensemble(
+    cfg: Dict[str, Any],
+    dataset: DatasetH,
+    seeds: List[int],
+    run_ctx: "RunContext",
+    test_segment: str = "test",
+) -> Tuple[pd.Series, List[float]]:
+    """N-seed LGBM 集成：每个 seed 独立训练 & 预测，最终对截面排名取均值。
+
+    rank-mean vs score-mean:
+      不同 seed 的 LGBM tree 集成在数值尺度上可能 shift（boost rounds 不同等），
+      "score 均值"会偏向 magnitude 大的 seed；"按日 pct rank 均值"消除尺度差异，
+      与 IC / Rank IC 评估口径一致，是金融 ensemble 的标准做法。
+
+    返回:
+      ensemble_score: 与单 seed predict 同结构的 pd.Series（index=(datetime,instrument)）
+      train_secs:     每个 seed 的训练耗时列表（用于诊断）
+    """
+    pred_seeds: List[pd.Series] = []
+    train_secs: List[float] = []
+    test_ic_per_seed: List[float] = []
+
+    # 取 raw label 一次，便于报告每个 seed 的 daily IC 平均（透明度）
+    label_seed_eval: Optional[pd.Series] = None
+    try:
+        lbl_df = dataset.prepare(test_segment, col_set="label")
+        if isinstance(lbl_df, pd.DataFrame) and not lbl_df.empty:
+            label_seed_eval = lbl_df.iloc[:, 0]
+    except Exception:  # noqa: BLE001
+        label_seed_eval = None
+
+    for i, seed in enumerate(seeds):
+        seed_cfg_model = _override_model_seeds(cfg["model"], seed)
+        t0 = time.perf_counter()
+        model: Model = init_instance_by_config(seed_cfg_model)
+        model.fit(dataset)
+        elapsed = round(time.perf_counter() - t0, 2)
+        train_secs.append(elapsed)
+
+        pred = model.predict(dataset, segment=test_segment)
+        if isinstance(pred, pd.DataFrame):
+            pred = pred.iloc[:, 0]
+        pred_seeds.append(pred.rename(f"seed_{seed}"))
+
+        # 每 seed 的截面平均 IC（仅用于日志透明度，不影响最终 score）
+        if label_seed_eval is not None:
+            try:
+                joined = pd.concat([pred.rename("p"), label_seed_eval.rename("y")], axis=1).dropna()
+                if not joined.empty:
+                    daily = joined.groupby(level="datetime").apply(
+                        lambda s: float(np.corrcoef(s["p"], s["y"])[0, 1])
+                        if s["p"].std() > 1e-12 and s["y"].std() > 1e-12 else np.nan
+                    )
+                    test_ic_per_seed.append(float(daily.mean()))
+                else:
+                    test_ic_per_seed.append(float("nan"))
+            except Exception:  # noqa: BLE001
+                test_ic_per_seed.append(float("nan"))
+        else:
+            test_ic_per_seed.append(float("nan"))
+
+        _log(
+            run_ctx.run_id,
+            f"ensemble seed[{i+1}/{len(seeds)}] seed={seed} train_sec={elapsed}s "
+            f"n_pred={len(pred)} test_ic={test_ic_per_seed[-1]:+.4f}",
+        )
+
+    # 拼成宽表后按日截面 pct-rank，再对所有 seed 取均值
+    wide = pd.concat(pred_seeds, axis=1)
+    rank_per_seed = wide.groupby(level="datetime").rank(pct=True)
+    ensemble_score = rank_per_seed.mean(axis=1, skipna=True)
+    ensemble_score.name = "score"
+
+    # 写入 timing 与 ensemble 元信息
+    run_ctx.timing["train_sec"] = round(sum(train_secs), 2)
+    run_ctx.timing["ensemble_seeds"] = len(seeds)
+    run_ctx.timing["ensemble_per_seed_ic"] = [round(x, 4) for x in test_ic_per_seed]
+    run_ctx.timing["ensemble_per_seed_train_sec"] = train_secs
+
+    _log(
+        run_ctx.run_id,
+        f"ensemble_done n_seeds={len(seeds)} per_seed_ic={[round(x,4) for x in test_ic_per_seed]} "
+        f"avg_test_ic={float(np.nanmean(test_ic_per_seed)):+.4f}",
+    )
+    return ensemble_score, train_secs
+
+
 # ─────────────────────────────────────────────────────────────────
 # 滚动训练（rolling fit）
 # ─────────────────────────────────────────────────────────────────
@@ -734,6 +838,16 @@ def main() -> None:
     parser.add_argument("--model", default=None, help="模型名称（mlp/lstm/gru/transformer/lgbm，大小写不敏感）")
     parser.add_argument("--freq", default=None, help="频率名称（daily/minute，别名如 1day/day 均可）")
     parser.add_argument("--config", default=None, help="完整 YAML 配置文件路径（旧接口兼容）")
+    parser.add_argument(
+        "--ensemble-seeds",
+        type=int,
+        default=1,
+        help=(
+            "LGBM 多 seed 集成数量（>=1）。N=1 时行为不变；N>1 时复用同一 dataset，"
+            "用 base_seed + i*1000 生成 N 个 seed，每个独立训练，最终按日截面 pct-rank "
+            "对 N 路预测取均值。仅在非 rolling 模式生效。"
+        ),
+    )
     args = parser.parse_args()
 
     wall_start = time.perf_counter()
@@ -769,25 +883,48 @@ def main() -> None:
     rolling_cfg: Dict[str, Any] = cfg.get("rolling") or {}
     rolling_enabled: bool = bool(rolling_cfg.get("enabled", False))
 
+    n_ensemble = max(1, int(args.ensemble_seeds or 1))
+    if rolling_enabled and n_ensemble > 1:
+        LOGGER.warning(
+            "rolling 模式下暂不支持 ensemble_seeds>1；本次按 ensemble_seeds=1 执行",
+            extra={"run_id": run_ctx.run_id, "instrument": "ALL", "datetime": "",
+                   "signal": 0.0, "version": VERSION},
+        )
+        n_ensemble = 1
+
     with R.start(experiment_name=experiment_name, recorder_name=run_ctx.run_id):
-        _log(run_ctx.run_id, f"run_start (rolling={'on' if rolling_enabled else 'off'})")
+        _log(
+            run_ctx.run_id,
+            f"run_start (rolling={'on' if rolling_enabled else 'off'}, "
+            f"ensemble_seeds={n_ensemble})",
+        )
 
         if rolling_enabled:
             # 滚动训练分支：dataset setup 一次，逐段重训 & 预测，拼接结果
             pred_score, dataset, cfg = run_rolling_fit(cfg, run_ctx)
         else:
-            # 一刀切分支：原有流程不变
+            # 一刀切分支：（可选）N-seed ensemble
             t0 = time.perf_counter()
             dataset = build_dataset(cfg)
             run_ctx.timing["dataset_build_sec"] = round(time.perf_counter() - t0, 2)
             _log(run_ctx.run_id, f"dataset_ready [{run_ctx.timing['dataset_build_sec']}s]")
 
-            t1 = time.perf_counter()
-            model = train_model(cfg, dataset)
-            run_ctx.timing["train_sec"] = round(time.perf_counter() - t1, 2)
-            _log(run_ctx.run_id, f"train_done [{run_ctx.timing['train_sec']}s]")
-
-            pred_score = model.predict(dataset, segment="test")
+            if n_ensemble == 1:
+                t1 = time.perf_counter()
+                model = train_model(cfg, dataset)
+                run_ctx.timing["train_sec"] = round(time.perf_counter() - t1, 2)
+                _log(run_ctx.run_id, f"train_done [{run_ctx.timing['train_sec']}s]")
+                pred_score = model.predict(dataset, segment="test")
+            else:
+                base_seed = int(cfg["model"].get("kwargs", {}).get("seed", 42))
+                seeds = [base_seed + i * 1000 for i in range(n_ensemble)]
+                _log(run_ctx.run_id, f"ensemble_start n_seeds={n_ensemble} seeds={seeds}")
+                t1 = time.perf_counter()
+                pred_score, _ = train_predict_ensemble(cfg, dataset, seeds, run_ctx)
+                _log(
+                    run_ctx.run_id,
+                    f"ensemble_total_train_sec={round(time.perf_counter() - t1, 2)}s",
+                )
 
         validate_pred_series(pred_score, run_ctx.run_id)
 

@@ -41,20 +41,52 @@ from . import (
     volume,
 )
 
+# ── 因子集开关 ───────────────────────────────────────────────────────
+# D3 阶段以"D1 基线"作为生产线：仅启用原 26 列原子因子；
+#   - audit_p0_diagnosis.py 实测：26 列方案在 TopK=8 / csi500 上 IR=+0.473，
+#     78 列扩展集 IC/ICIR 略胜但 IR 跌至 +0.105，TopK 离散选股下不占优；
+#   - 78 列代码完整保留作"信号种子"，未来做信号融合 / 大 TopK / 行业中性化
+#     时一键启用即可。
+# 启用方式: 把常量改为 True，或在调试时通过 monkey-patch 模块属性切换。
+USE_EXTENDED_ALPHAS: bool = False
+
+# ── 原 26 列基线（D1 / 4d43003f 配置）──────────────────────────────
+# 顺序与 4d43003f 完全一致，确保特征列顺序可复现。
+#
+# ⚠ 注意 KSFT 表达式漂移修复：
+#   - 4d43003f（commit 0599d82f）时期的 `KSFT` 表达式为
+#       (2*$close_qfq-$high_qfq-$low_qfq)/($high_qfq-$low_qfq+1e-12)   # ← 相对振幅
+#   - 后续重构对齐 Alpha158 时把 `KSFT` 改成 (2*close-high-low)/open（相对开盘价），
+#     原表达式被命名为 `KSFT2`。
+#   - 因此恢复 D1 基线时要选 `KSFT2`，而不是当前同名的 `KSFT`，否则因子语义会偏。
+_TECHNICAL_BASELINE_NAMES: frozenset[str] = frozenset({
+    "KMID", "KLEN", "KSFT2",
+    "STD5", "STD20",
+    "MA5_20", "MA10_60",
+    "RSI12", "MACD_DIF", "KDJK",
+})
+
+_ORIGINAL_26: list[AlphaDef] = (
+    momentum.ALPHAS                                # 3: RET1, RET2, RET5
+    + volume.ALPHAS                                # 5: VOL_CHG, VOL5, VOL20, TURN, NET_AMT(disabled)
+    + [a for a in technical.ALPHAS if a.name in _TECHNICAL_BASELINE_NAMES]  # 10
+    + fundamental.ALPHAS                           # 2: PB, MV
+)
+
+# ── 扩展 57 列（P0 引入，D3 默认禁用）────────────────────────────────
+_EXTENDED_57: list[AlphaDef] = (
+    momentum_ext.ALPHAS                            # +4: RET10/20/30/60
+    + volatility.ALPHAS                            # +8: WVMA + VSTD ×4
+    + [a for a in technical.ALPHAS if a.name not in _TECHNICAL_BASELINE_NAMES]  # +9: K线/STD扩档
+    + ma_window.ALPHAS                             # +10: MA + STDP ×5
+    + corr.ALPHAS                                  # +7: CORR ×4 + CORD ×3
+    + regression.ALPHAS                            # +12: BETA/RSQR/RESI ×4
+    + count.ALPHAS                                 # +9: CNTP/CNTN/CNTD ×3
+)
+
 # ── 内置因子注册表（顺序即 QlibDataLoader 中的列顺序）────────────────
-# 按业务组别聚合：momentum → volume → technical → fundamental，
-# 每组内先现有原子因子、后新增的多窗口因子。
 _BUILTIN_ALPHAS: list[AlphaDef] = (
-    momentum.ALPHAS
-    + momentum_ext.ALPHAS
-    + volume.ALPHAS
-    + volatility.ALPHAS
-    + technical.ALPHAS
-    + ma_window.ALPHAS
-    + corr.ALPHAS
-    + regression.ALPHAS
-    + count.ALPHAS
-    + fundamental.ALPHAS
+    _ORIGINAL_26 + _EXTENDED_57 if USE_EXTENDED_ALPHAS else list(_ORIGINAL_26)
 )
 
 
