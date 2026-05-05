@@ -30,6 +30,8 @@ from .execution_layer import ExecutionLayer
 from .market_layer import MarketLayer, CostModel
 from .portfolio_layer import PortfolioLayer, PortfolioState
 from .analysis_layer import AnalysisLayer, PerformanceMetrics
+# 五段式策略管线（中频机构化）：候选 → 加权 → 约束 → 提交
+from . import strategy as strategy_pipeline  # noqa: F401  保证子包 import 路径可用
 
 __all__ = [
     "BacktestEngine",
@@ -44,4 +46,5 @@ __all__ = [
     "PortfolioState",
     "AnalysisLayer",
     "PerformanceMetrics",
+    "strategy_pipeline",
 ]

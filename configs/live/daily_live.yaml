@@ -1,0 +1,43 @@
+# 实盘预测专用配置（日频）
+# 用法：python python/predict_live.py --model lgbm --freq daily
+#       (predict_live.py 自动读取此文件，动态注入 end_time 和 segments)
+#
+# 与 base.yaml + configs/freq/daily.yaml 的区别：
+#   1. 不含 dataset_segments（由 predict_live.py 按 --date 参数动态注入）
+#   2. end_time 占位符（由 predict_live.py 替换为 --date 当日）
+#   3. 去掉回测相关字段（executor、backtest）
+#   4. 新增 live.* 字段控制选股行为
+
+qlib_init:
+  provider_uri: "D:/qlib_data/qlib_data"
+  region: cn
+
+experiment:
+  run_id: "lgbm_daily_live"
+  market: "all"
+  benchmark: "000905.SZ"
+  # start_time / end_time 由 predict_live.py 注入（end_time = --date 参数）
+  start_time: "2020-01-01"
+  end_time: "DYNAMIC"          # 占位符，predict_live.py 会替换为实际日期
+  seed: 42
+  tradable_universe: "csi500"  # 实盘与回测口径一致：只在 csi500 中选股
+
+# 实盘选股参数
+live:
+  topk: 5                      # 每日最多推荐 N 只股票
+  score_quantile: 0.8          # 只在 csi500 内打分前 20% 中再取 topk（提升信噪比）
+  weight_method: "equal"       # equal=等权 | score=按打分比例 | inverse_vol=反波动率
+  min_score_threshold: null    # 可选：打分低于此阈值的股票不推荐（null=不过滤）
+  # 换仓提示阈值：当前持仓股票与新推荐偏差超过此分位时，标记为 "建议换仓"
+  drop_signal_quantile: 0.3    # 持仓股票打分低于 csi500 内此分位 → 标记 drop_out
+
+# 模型路径（predict-only 模式使用；retrain-and-predict 模式会覆盖 latest）
+model_store:
+  base_dir: "artifacts/models"
+  # latest_path = <base_dir>/latest_<model>_<freq>.pkl
+  # predict_live.py 自动拼接，无需手动填写
+
+# 历史预测追踪
+tracking:
+  predictions_dir: "predictions"   # 预测结果保存目录（相对仓库根）
+  history_days: 20                 # report.html 中展示最近 N 日预测记录

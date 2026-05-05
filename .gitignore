@@ -1,4 +1,22 @@
-"mlruns" 
-"artifacts"
+# 大目录产物（数据/实验/工件）
 mlruns/
 artifacts/
+
+# Python 字节码缓存
+__pycache__/
+*.py[cod]
+*$py.class
+
+# 虚拟环境
+.venv/
+venv/
+env/
+
+# IDE / 系统
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+
+# 临时调试脚本（约定: __tmp_*.py）
+__tmp_*.py

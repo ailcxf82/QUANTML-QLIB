@@ -91,15 +91,17 @@ class BacktestEngine:
         cfg: Dict[str, Any],
         output_dir: Optional[Path] = None,
         label: Optional[pd.Series] = None,
+        rolling_summary: Optional[Dict[str, Any]] = None,
     ) -> BacktestResult:
         """
         端到端回测主流程。
 
         Args:
-            pred_score:  模型预测打分，MultiIndex(datetime, instrument)
-            cfg:         合并后的完整配置字典
-            output_dir:  结果输出目录（传入时生成图表与 HTML 报告）
-            label:       测试集实际标签序列（传入时计算 IC/ICIR）
+            pred_score:      模型预测打分，MultiIndex(datetime, instrument)
+            cfg:             合并后的完整配置字典
+            output_dir:      结果输出目录（传入时生成图表与 HTML 报告）
+            label:           测试集实际标签序列（传入时计算 IC/ICIR）
+            rolling_summary: Walk-Forward 汇总字典（非 None 时在 HTML 报告中渲染 fold 稳定性一节）
 
         Returns:
             BacktestResult
@@ -119,9 +121,17 @@ class BacktestEngine:
         )
 
         # ──────────────────────────────────────────────────────────────────
-        # [2] 策略层：信号 + 策略参数 → Qlib 策略配置
+        # [2] 策略层：信号 + 策略参数 → Qlib 策略配置 → 预实例化（供后续诊断）
         # ──────────────────────────────────────────────────────────────────
         strategy_config = self._strategy_layer.build(cfg["strategy"], pred_score)
+        try:
+            from qlib.utils import init_instance_by_config
+            from qlib.strategy.base import BaseStrategy
+            strategy_obj = init_instance_by_config(
+                strategy_config, accept_types=BaseStrategy
+            )
+        except Exception:
+            strategy_obj = None  # 兼容性兜底；qlib_backtest 仍可消费 dict
 
         # ──────────────────────────────────────────────────────────────────
         # [3] 执行层：构建执行器（日频/分钟频）
@@ -140,12 +150,34 @@ class BacktestEngine:
         portfolio_metric_dict, indicator_dict = qlib_backtest(
             start_time=cfg["dataset"]["kwargs"]["segments"]["test"][0],
             end_time=exp_cfg["end_time"],
-            strategy=strategy_config,
+            strategy=strategy_obj if strategy_obj is not None else strategy_config,
             executor=executor_config,
             benchmark=exp_cfg["benchmark"],
             account=exp_cfg["account"],
             exchange_kwargs=exchange_kwargs,
         )
+
+        # 持久化止盈止损触发事件（仅 QuantMLWeightStrategy 提供 get_exit_events）
+        exit_events_df: Optional[pd.DataFrame] = None
+        if strategy_obj is not None and hasattr(strategy_obj, "get_exit_events"):
+            try:
+                exit_events_df = strategy_obj.get_exit_events()
+            except Exception:
+                exit_events_df = None
+        if exit_events_df is not None:
+            n_exits = len(exit_events_df)
+            if output_dir is not None:
+                exit_events_df.to_parquet(output_dir / "exit_events.parquet")
+            if n_exits > 0:
+                breakdown = (
+                    exit_events_df.groupby("reason").size().to_dict()
+                    if "reason" in exit_events_df.columns else {}
+                )
+                print(
+                    f"[{run_id}] 止盈止损触发 {n_exits} 次，分布: {breakdown}"
+                )
+            else:
+                print(f"[{run_id}] 止盈止损未触发（exit_events 为空）")
 
         # ──────────────────────────────────────────────────────────────────
         # [5] 组合状态层：解析 portfolio_metric_dict
@@ -171,6 +203,7 @@ class BacktestEngine:
                 output_dir, run_id, model_name, freq_name,
                 metrics, signal_summary, portfolio_state, indicator_df,
                 trade_records=trade_records,
+                rolling_summary=rolling_summary,
             )
 
         self._analysis_layer.print_report(

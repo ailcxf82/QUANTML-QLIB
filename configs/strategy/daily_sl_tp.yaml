@@ -1,0 +1,36 @@
+# 日频交易 + 止盈 / 止损 / 移动止损（与 Qlib 日频 bar 一致，无盘中触发）
+# =========================================================================
+# 使用方式：
+#   python python/run_experiment.py --model lgbm --freq daily \
+#       --strategy-cfg configs/strategy/daily_sl_tp.yaml \
+#       --ensemble-seeds 5
+#
+# 说明：
+#   - rebalance_freq: 1 → 每个 trade_step 用模型重算权重（日频）
+#   - n_drop: 每期"上期持有→本期目标外"最多 N 只（不含止盈止损平仓）。
+#             与 risk_cfg.max_turnover 互补：前者控票数，后者控金额。
+#   - exit_* ：在持有且仍位于目标组合内的标的上按收盘价判定；止损/止盈触发后从目标权中剔除并再归一化
+#   - trailing_stop_pct：相对持仓以来峰值回撤比例（峰值在日频上逐 bar 更新）
+
+strategy:
+  class: "QuantMLWeightStrategy"
+  module_path: "backtest.strategy"
+  kwargs:
+    topk: 5
+    score_quantile: 0.70
+    rebalance_freq: 5
+    vol_lookback: 60
+    n_drop: 1                 # topk=5 → 单日最多换出 1 只
+    weighter_cfg:
+      type: "inverse_vol"
+      kwargs:
+        lookback: 60
+        min_vol: 0.005
+    risk_cfg:
+      max_weight: 0.08
+      sector_max_weight: 0.30
+      max_turnover: 0.30
+    exit_rules:
+      stop_loss_pct: 0.08
+      take_profit_pct: 0.10
+      trailing_stop_pct: 0.06

@@ -1,0 +1,44 @@
+# 中频机构化策略：双周调仓 + 风险平价/IV 权重 + 单票/板块/换手三层约束
+# ====================================================================
+# 设计目标（vs 基线 TopkDropoutStrategy + topk=8 + n_drop=2）：
+#   年化收益: 30~50% （vs 77%，主动让渡）
+#   最大回撤: ≤ 6%   （vs -8.75%）
+#   夏普:     ≥ 4.0  （vs 3.04）
+#   IR:       ≥ 0.8  （vs 0.37）
+#   年换手:   ≤ 300% （vs ~12000%）
+#   单票上限: ≤ 8%   （vs 12.5% 等权）
+#
+# 通过 run_experiment.py 的 --strategy-cfg 开关注入：
+#   python python/run_experiment.py --model lgbm --freq daily \
+#       --strategy-cfg configs/strategy/midfreq_rp.yaml \
+#       --ensemble-seeds 5
+
+strategy:
+  class: "QuantMLWeightStrategy"
+  module_path: "backtest.strategy"
+  kwargs:
+    # ── 候选选择 ──────────────────────────────────────────────────
+    # 25 只持仓 ≈ 中证500 头部 5%；
+    # score_quantile=0.7 强制只在分位前 30% 中再 topk，过滤弱信号日
+    topk: 25
+    score_quantile: 0.70
+    # ── 调仓节流 ──────────────────────────────────────────────────
+    # 10 个交易步 ≈ 双周；将日均换手从 49% 拉回到 ≤ 30%/期
+    rebalance_freq: 10
+    # ── 历史窗口 ──────────────────────────────────────────────────
+    # 60 日 ≈ 三个月，用于 IV/RP 估计波动率与协方差
+    vol_lookback: 60
+    # ── 权重方案 ──────────────────────────────────────────────────
+    # inverse_vol = 波动率倒数加权，数学最稳定，A 股长仓友好
+    # 可切换：equal / score / risk_parity
+    weighter_cfg:
+      type: "inverse_vol"
+      kwargs:
+        lookback: 60
+        min_vol: 0.005    # 单日 0.5% 波动率下限，防止低波动票占满
+    # ── 风险约束 ──────────────────────────────────────────────────
+    # 三层约束顺序施加：单票 → 板块 → 换手 → 最终归一化
+    risk_cfg:
+      max_weight: 0.08          # 单票 ≤ 8%（机构口径）
+      sector_max_weight: 0.30   # 单板块 ≤ 30%（板块映射来自 trade_layer.classify_market）
+      max_turnover: 0.30        # 单期换手 ≤ 30%（双边定义，与 qlib 一致）

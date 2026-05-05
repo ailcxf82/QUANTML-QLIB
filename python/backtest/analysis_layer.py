@@ -21,7 +21,7 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
+from typing import Any, Dict, Optional
 
 import numpy as np
 import pandas as pd
@@ -733,8 +733,13 @@ class AnalysisLayer:
         state: Optional[PortfolioState] = None,
         indicator_df: Optional[pd.DataFrame] = None,
         trade_records: Optional[TradeRecords] = None,
+        rolling_summary: Optional[Dict[str, Any]] = None,
     ) -> None:
-        """生成自包含 HTML 回测报告。"""
+        """生成自包含 HTML 回测报告。
+
+        rolling_summary 若非 None，会在报告末尾插入"fold 间稳定性"一节，
+        展示各 fold IC/年化/换手的均值±标准差。
+        """
         charts_dir = output_dir / "charts"
 
         def _hp(v: float, d: int = 2) -> str:
@@ -849,6 +854,65 @@ class AnalysisLayer:
           <th>超额收益</th>
         </tr>
         {rebalance_rows}
+      </table>
+    </div>"""
+
+        # ── fold 间稳定性区块（walk-forward 模式） ────────────────────────────
+        rolling_stability_html = ""
+        if rolling_summary and rolling_summary.get("fold_count", 0) > 1:
+            fold_stats = rolling_summary.get("fold_stats", {})
+            fold_records = rolling_summary.get("folds", [])
+            oos_start = rolling_summary.get("oos_range", {}).get("start", "?")
+            oos_end = rolling_summary.get("oos_range", {}).get("end", "?")
+            fold_count = rolling_summary.get("fold_count", 0)
+
+            # per-fold IC 行
+            fold_ic_rows = ""
+            for fr in fold_records:
+                fm = fr.get("metrics", {})
+                fold_ic_rows += (
+                    f"<tr>"
+                    f"<td>fold {fr['fold_id']}</td>"
+                    f"<td>{fr['test']['start']} ~ {fr['test']['end']}</td>"
+                    f"<td>{fm.get('ic_mean', float('nan')):.4f}" if fm.get('ic_mean') is not None else "<td>—"
+                    f"</td>"
+                    f"<td>{fm.get('icir', float('nan')):.4f}" if fm.get('icir') is not None else "<td>—"
+                    f"</td>"
+                    f"</tr>"
+                )
+
+            # 汇总统计行
+            def _stat_cell(key: str) -> str:
+                s = fold_stats.get(key, {})
+                if not s:
+                    return "<td>—</td><td>—</td>"
+                return (
+                    f"<td>{s['mean']:.4f} ± {s['std']:.4f}</td>"
+                    f"<td>[{s['min']:.4f}, {s['max']:.4f}]</td>"
+                )
+
+            rolling_stability_html = f"""
+    <div class="section">
+      <h2>Walk-Forward fold 间稳定性</h2>
+      <p style="margin:0 0 12px;color:#666;font-size:12px;">
+        共 {fold_count} 个 fold，OOS 总覆盖：{oos_start} ~ {oos_end}
+      </p>
+      <table>
+        <tr>
+          <th>指标</th><th>均值 ± 标准差</th><th>最小 ~ 最大</th>
+        </tr>
+        <tr><td>IC（日均）</td>{_stat_cell("ic_mean")}</tr>
+        <tr><td>ICIR</td>{_stat_cell("icir")}</tr>
+        <tr><td>年化收益</td>{_stat_cell("annualized_return")}</tr>
+        <tr><td>最大回撤</td>{_stat_cell("max_drawdown")}</tr>
+        <tr><td>Sharpe</td>{_stat_cell("sharpe_ratio")}</tr>
+        <tr><td>平均换手</td>{_stat_cell("avg_turnover")}</tr>
+      </table>
+      <br>
+      <h3>各 fold OOS 信号指标</h3>
+      <table>
+        <tr><th>fold</th><th>OOS 测试区间</th><th>IC 均值</th><th>ICIR</th></tr>
+        {fold_ic_rows}
       </table>
     </div>"""
 
@@ -1031,6 +1095,7 @@ class AnalysisLayer:
 
     {ic_html}
     {trade_html}
+    {rolling_stability_html}
 
     <div class="section">
       <h2>可视化图表</h2>

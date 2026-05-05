@@ -1,0 +1,9 @@
+{
+  "run_id": "lgbm_daily_d420c812",
+  "model": "lgbm",
+  "freq": "daily",
+  "train_end": "2024-06-30",
+  "n_features": null,
+  "saved_at": "2026-05-05T21:38:50.886471",
+  "version": "v2"
+}

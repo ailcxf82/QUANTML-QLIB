@@ -1,0 +1,23 @@
+# Walk-Forward 扩展窗口配置（半年步长）
+# 用法：python python/run_experiment.py --model lgbm --freq daily \
+#             --rolling-mode walk_forward \
+#             --rolling-cfg configs/rolling/expanding_halfyearly.yaml
+#
+# 切分示意（基于 2020-01-01 ~ 2026-04-28 的 6 年数据，共 4 个 fold）：
+#   fold1: train=[2020-01-01, 2023-12-24]  valid=[2024-01-01, 2024-06-30]  test=[2024-07-01, 2024-12-31]
+#   fold2: train=[2020-01-01, 2024-06-23]  valid=[2024-07-01, 2024-12-31]  test=[2025-01-01, 2025-06-30]
+#   fold3: train=[2020-01-01, 2024-12-24]  valid=[2025-01-01, 2025-06-30]  test=[2025-07-01, 2025-12-31]
+#   fold4: train=[2020-01-01, 2025-06-23]  valid=[2025-07-01, 2025-12-31]  test=[2026-01-01, 2026-04-28]
+#
+# OOS 总覆盖：2024-07-01 ~ 2026-04-28 约 22 个月，涵盖完整市场周期
+
+rolling:
+  mode: walk_forward          # 仅支持 walk_forward（未来可扩展 sliding_window）
+  train_min: "4y"             # 最小训练窗口：第一个 fold 的训练集至少 4 年
+  valid_size: "6m"            # 每 fold 验证集（用于 LGBM 早停）
+  test_size: "6m"             # 每 fold OOS 测试集（最后一个 fold 由 data_end 截断）
+  step: "6m"                  # 相邻 fold 的测试集起点偏移量（通常 = test_size）
+  purge_days: 2               # train_end 距 valid_start 的硬间隔（防 label lookahead）
+                              #   label = Ref($close_qfq,-2)/... → |k|=2 → purge=2
+  embargo_days: 5             # purge 后额外缓冲（防特征自相关传播）
+                              #   默认 total_gap = purge + embargo = 7 个自然日

@@ -1,0 +1,151 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>实盘预测报告 2026-04-30</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; }
+    body {
+      font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif;
+      margin: 0; background: #f0f2f5; color: #1a1a2e; font-size: 14px;
+    }
+    .container { max-width: 1100px; margin: 0 auto; padding: 24px; }
+    .header {
+      background: linear-gradient(135deg, #1a1f3c 0%, #2d3561 100%);
+      color: white; padding: 24px 32px; border-radius: 12px; margin-bottom: 20px;
+    }
+    .header h1 { margin: 0 0 8px; font-size: 20px; }
+    .header .meta { font-size: 12px; opacity: .75; line-height: 2; }
+    .header .meta span { margin-right: 20px; }
+    .badge-live {
+      display: inline-block; background: #e74c3c; color: #fff;
+      padding: 3px 10px; border-radius: 20px; font-size: 11px;
+      margin-left: 10px; vertical-align: middle; letter-spacing: 1px;
+    }
+    .section {
+      background: white; border-radius: 10px; padding: 20px 24px;
+      margin-bottom: 16px; box-shadow: 0 2px 6px rgba(0,0,0,.06);
+    }
+    h2 {
+      margin: 0 0 14px; font-size: 14px; color: #1a1f3c;
+      border-left: 4px solid #D94040; padding-left: 10px;
+    }
+    table { border-collapse: collapse; width: 100%; font-size: 13px; }
+    th {
+      background: #f5f7fa; padding: 8px 12px; text-align: left;
+      font-weight: 600; color: #444; border-bottom: 2px solid #e8eaf0;
+    }
+    td { padding: 9px 12px; border-bottom: 1px solid #f0f0f0; vertical-align: middle; }
+    tr:last-child td { border-bottom: none; }
+    tr:hover td { background: #fafbff; }
+    .dist-bar { font-size: 12px; color: #666; padding: 8px 0; }
+    .dist-bar span { margin-right: 0; }
+    .note { font-size: 11px; color: #999; margin-top: 12px; }
+  </style>
+</head>
+<body>
+<div class="container">
+  <div class="header">
+    <h1>实盘预测报告 — 2026-04-30 <span class="badge-live">LIVE</span></h1>
+    <div class="meta">
+      <span>模型: lgbm/daily</span>
+      <span>训练截止: 2024-06-30</span>
+      <span>版本: lgbm_daily_d420c812</span>
+      <span>生成时间: 2026-05-05T21:38:50</span>
+      <span>选股池: csi500</span>
+      <span>推荐数量: Top 5</span>
+    </div>
+  </div>
+
+  <div class="section">
+    <h2>今日推荐持仓（T+1 参考执行）</h2>
+    <div class="dist-bar">信号分布: <span>总标的数 5457</span> &nbsp;|&nbsp; <span>正信号 4819 (88.3%)</span> &nbsp;|&nbsp; <span>负信号 638</span> &nbsp;|&nbsp; <span>均值 0.0721 ± 0.0986</span></div>
+    <br>
+    <table>
+      <tr>
+        <th>股票</th>
+        <th>排名</th>
+        <th>模型打分</th>
+        <th>百分位</th>
+        <th>建议权重</th>
+        <th>变化</th>
+        <th>打分变化</th>
+      </tr>
+      
+        <tr>
+          <td style="font-weight:600">603095.SH<br>
+            <small style="color:#999;font-weight:normal">603095.SH</small></td>
+          <td style="text-align:center">1</td>
+          <td><div style="display:flex;align-items:center;gap:6px"><div style="width:100px;height:12px;background:#2ecc71;border-radius:3px;min-width:4px"></div><span>0.3893</span></div></td>
+          <td style="text-align:center">100.0%</td>
+          <td style="text-align:center">20.0%</td>
+          <td style="text-align:center"><span style="background:#2ecc71;color:#fff;padding:2px 8px;border-radius:4px;font-size:11px">新入</span></td>
+          <td style="text-align:center">—</td>
+        </tr>
+        <tr>
+          <td style="font-weight:600">603045.SH<br>
+            <small style="color:#999;font-weight:normal">603045.SH</small></td>
+          <td style="text-align:center">2</td>
+          <td><div style="display:flex;align-items:center;gap:6px"><div style="width:83px;height:12px;background:#2ecc71;border-radius:3px;min-width:4px"></div><span>0.3244</span></div></td>
+          <td style="text-align:center">99.9%</td>
+          <td style="text-align:center">20.0%</td>
+          <td style="text-align:center"><span style="background:#2ecc71;color:#fff;padding:2px 8px;border-radius:4px;font-size:11px">新入</span></td>
+          <td style="text-align:center">—</td>
+        </tr>
+        <tr>
+          <td style="font-weight:600">603399.SH<br>
+            <small style="color:#999;font-weight:normal">603399.SH</small></td>
+          <td style="text-align:center">3</td>
+          <td><div style="display:flex;align-items:center;gap:6px"><div style="width:79px;height:12px;background:#2ecc71;border-radius:3px;min-width:4px"></div><span>0.3079</span></div></td>
+          <td style="text-align:center">99.8%</td>
+          <td style="text-align:center">20.0%</td>
+          <td style="text-align:center"><span style="background:#2ecc71;color:#fff;padding:2px 8px;border-radius:4px;font-size:11px">新入</span></td>
+          <td style="text-align:center">—</td>
+        </tr>
+        <tr>
+          <td style="font-weight:600">000609.SZ<br>
+            <small style="color:#999;font-weight:normal">000609.SZ</small></td>
+          <td style="text-align:center">4</td>
+          <td><div style="display:flex;align-items:center;gap:6px"><div style="width:78px;height:12px;background:#2ecc71;border-radius:3px;min-width:4px"></div><span>0.3053</span></div></td>
+          <td style="text-align:center">99.7%</td>
+          <td style="text-align:center">20.0%</td>
+          <td style="text-align:center"><span style="background:#2ecc71;color:#fff;padding:2px 8px;border-radius:4px;font-size:11px">新入</span></td>
+          <td style="text-align:center">—</td>
+        </tr>
+        <tr>
+          <td style="font-weight:600">920023.BJ<br>
+            <small style="color:#999;font-weight:normal">920023.BJ</small></td>
+          <td style="text-align:center">5</td>
+          <td><div style="display:flex;align-items:center;gap:6px"><div style="width:72px;height:12px;background:#2ecc71;border-radius:3px;min-width:4px"></div><span>0.2802</span></div></td>
+          <td style="text-align:center">99.6%</td>
+          <td style="text-align:center">20.0%</td>
+          <td style="text-align:center"><span style="background:#2ecc71;color:#fff;padding:2px 8px;border-radius:4px;font-size:11px">新入</span></td>
+          <td style="text-align:center">—</td>
+        </tr>
+    </table>
+    <p class="note">
+      注：推荐结果基于收盘后模型推理，次日开盘参考执行（T+1）。
+      建议权重为等权分配参考值，实际仓位请结合个人风险偏好调整。
+      股票存在涨跌停、停牌等情况时可能无法按预期成交。
+    </p>
+  </div>
+
+  
+
+  
+
+  <div class="section">
+    <h2>使用说明</h2>
+    <table>
+      <tr><th>字段</th><th>说明</th></tr>
+      <tr><td>排名</td><td>在 csi500 内按模型打分降序排列</td></tr>
+      <tr><td>模型打分</td><td>LGBM 输出的预测收益率（正值=模型认为将上涨）</td></tr>
+      <tr><td>百分位</td><td>在 csi500 全截面中的打分百分位（越高越好）</td></tr>
+      <tr><td>建议权重</td><td>等权分配（1/topK），实际可按风控需求调整</td></tr>
+      <tr><td>变化</td><td>新入=昨日不在推荐中；持续=昨日已推荐；退出=打分明显下滑</td></tr>
+    </table>
+  </div>
+</div>
+</body>
+</html>
