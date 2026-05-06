@@ -112,6 +112,8 @@ class BacktestEngine:
         freq_key: str = cfg.get("model_meta", {}).get("freq_key", "1day")
         model_name: str = cfg.get("model_meta", {}).get("name", "unknown")
         freq_name: str = cfg.get("freq_meta", {}).get("name", "unknown")
+        if output_dir is not None:
+            output_dir.mkdir(parents=True, exist_ok=True)
 
         # ──────────────────────────────────────────────────────────────────
         # [1] 信号层：校验信号，计算 IC/ICIR
@@ -167,7 +169,8 @@ class BacktestEngine:
         if exit_events_df is not None:
             n_exits = len(exit_events_df)
             if output_dir is not None:
-                exit_events_df.to_parquet(output_dir / "exit_events.parquet")
+                parquet_path = output_dir / "exit_events.parquet"
+                exit_events_df.to_parquet(parquet_path)
             if n_exits > 0:
                 breakdown = (
                     exit_events_df.groupby("reason").size().to_dict()

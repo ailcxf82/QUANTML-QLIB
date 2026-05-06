@@ -303,6 +303,177 @@ def filter_to_universe(
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# 特殊股票过滤（ST / 连续涨停）— 统一使用 StockFilter 模块
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _build_stock_filter(live_cfg_raw: Dict[str, Any]) -> Any:
+    """从 live 配置构建 StockFilter 实例。
+
+    ST CSV 路径优先读取 filter.st_csv_path，
+    其次自动拼接 qlib_init.provider_uri/is_st.csv。
+    """
+    from backtest.strategy.stock_filter import StockFilter
+
+    filter_cfg = live_cfg_raw.get("filter", {})
+    provider_uri = live_cfg_raw.get("qlib_init", {}).get("provider_uri", "")
+
+    # 优先用显式配置，其次自动推断
+    st_csv = filter_cfg.get("st_csv_path") or (
+        str(Path(provider_uri) / "is_st.csv") if provider_uri else None
+    )
+    consecutive_limit_days = int(filter_cfg.get("consecutive_limit_days", 3))
+
+    return StockFilter(
+        st_csv_path=st_csv,
+        consecutive_limit_days=consecutive_limit_days,
+    )
+
+
+def filter_and_refill(
+    selection: pd.DataFrame,
+    pred_score: pd.Series,
+    predict_date: str,
+    topk: int,
+    score_quantile: float = 0.0,
+    min_score_threshold: Optional[float] = None,
+    stock_filter: Optional[Any] = None,
+    exclude_st: bool = True,
+    exclude_limit_up: bool = True,
+) -> Tuple[pd.DataFrame, List[Dict[str, Any]]]:
+    """过滤 ST 和连续涨停股票，并从剩余候选池中补充替代股票。
+
+    过滤逻辑：
+      - ST 类：从 is_st.csv 按日期查询，财务风险高，日限幅仅 ±5%
+      - 连续涨停：封单状态大概率无法在 T+1 买入，泡沫回撤风险高
+
+    Args:
+        selection:     select_topk 的初步结果（不含 drop_out 行）
+        pred_score:    universe 内全量打分（MultiIndex: datetime/instrument）
+        predict_date:  预测日期
+        topk:          目标持仓数量
+        stock_filter:  StockFilter 实例（None 则跳过过滤）
+        exclude_st:    是否过滤 ST 股票
+        exclude_limit_up: 是否过滤连续涨停股票
+
+    Returns:
+        (updated_selection, exclusion_log)
+    """
+    exclusion_log: List[Dict[str, Any]] = []
+
+    if stock_filter is None:
+        # 无过滤器：直接截取 topk
+        result_df = selection.head(topk).copy()
+        result_df["rank"] = range(1, len(result_df) + 1)
+        return result_df, exclusion_log
+
+    # ── 构建今日截面完整排序列表（用于补充替代股） ─────────────────
+    if isinstance(pred_score.index, pd.MultiIndex):
+        dt_level = pred_score.index.get_level_values("datetime")
+        date_ts = pd.Timestamp(predict_date)
+        avail = sorted(dt_level.unique())
+        actual_date = max((d for d in avail if d <= date_ts), default=avail[-1])
+        scores_today = pred_score[dt_level == actual_date].copy()
+        scores_today.index = scores_today.index.get_level_values("instrument")
+    else:
+        scores_today = pred_score.copy()
+
+    scores_today = scores_today.dropna().sort_values(ascending=False)
+    if score_quantile > 0:
+        scores_today = scores_today[scores_today >= scores_today.quantile(score_quantile)]
+    if min_score_threshold is not None:
+        scores_today = scores_today[scores_today >= min_score_threshold]
+
+    # ── 批量检测候选池（当前选股 + topk*5 备用池） ──────────────────
+    check_pool = scores_today.index.tolist()[: topk * 6]
+    print(f"  [过滤] 批量检测候选池 {len(check_pool)} 支...")
+    excluded_reasons = stock_filter.get_excluded_with_reasons(
+        check_pool,
+        date=predict_date,
+        check_st=exclude_st,
+        check_limit_up=exclude_limit_up,
+    )
+    if excluded_reasons:
+        print(f"  [过滤] 命中 {len(excluded_reasons)} 支: {list(excluded_reasons.keys())}")
+    else:
+        print("  [过滤] 候选池内未发现 ST / 连续涨停股票")
+
+    # ── 过滤当前选股 ──────────────────────────────────────────────
+    keep_rows: List[pd.Series] = []
+    excluded_instruments: set = set()
+    for _, row in selection.iterrows():
+        inst = str(row["instrument"])
+        reason = excluded_reasons.get(inst)
+        if reason:
+            exclusion_log.append(
+                {
+                    "instrument": inst,
+                    "reason": reason,
+                    "original_rank": int(row.get("rank", 999)),
+                    "score": float(row["score"]),
+                    "replacement": None,
+                }
+            )
+            excluded_instruments.add(inst)
+            print(f"  [过滤] 排除 {inst}（原排名 {int(row.get('rank', 999))}）: {reason}")
+        else:
+            keep_rows.append(row)
+
+    result_df = (
+        pd.DataFrame(keep_rows).reset_index(drop=True)
+        if keep_rows
+        else pd.DataFrame(columns=selection.columns)
+    )
+
+    # ── 从候选池中补充替代股票 ────────────────────────────────────
+    already_selected = set(result_df["instrument"].tolist()) if not result_df.empty else set()
+    need_fill = topk - len(result_df)
+    filled_count = 0
+    log_idx = 0
+
+    if need_fill > 0:
+        print(f"  [过滤] 需补充 {need_fill} 支替代股票...")
+        for inst, score in scores_today.items():
+            if filled_count >= need_fill:
+                break
+            inst_str = str(inst)
+            if inst_str in already_selected or inst_str in excluded_instruments:
+                continue
+            if inst_str in excluded_reasons:
+                excluded_instruments.add(inst_str)
+                continue
+
+            pct = round(float((scores_today < score).mean()) * 100, 1)
+            new_rank = len(keep_rows) + filled_count + 1
+            new_row = {
+                "instrument": inst_str,
+                "score": float(score),
+                "rank": new_rank,
+                "suggested_weight": round(1.0 / topk, 4),
+                "percentile": pct,
+                "predict_date": predict_date,
+            }
+            if log_idx < len(exclusion_log):
+                exclusion_log[log_idx]["replacement"] = inst_str
+                log_idx += 1
+
+            result_df = pd.concat([result_df, pd.DataFrame([new_row])], ignore_index=True)
+            already_selected.add(inst_str)
+            filled_count += 1
+            print(f"  [过滤] 补充替代股 {inst_str}（新排名 {new_rank}，打分={score:.4f}）")
+
+        if filled_count < need_fill:
+            print(f"  [过滤] 警告：仅补充 {filled_count} 支，不足 {need_fill} 支")
+
+    # ── 重新排名 & 权重 ───────────────────────────────────────────
+    if not result_df.empty:
+        result_df = result_df.sort_values("score", ascending=False).reset_index(drop=True)
+        result_df["rank"] = range(1, len(result_df) + 1)
+        result_df["suggested_weight"] = round(1.0 / max(len(result_df), 1), 4)
+
+    return result_df, exclusion_log
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # 选股逻辑
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -498,6 +669,7 @@ def persist_prediction(
     pred_score: pd.Series,
     model_meta: Dict[str, Any],
     live_cfg: Dict[str, Any],
+    exclusion_log: Optional[List[Dict[str, Any]]] = None,
 ) -> Path:
     """将今日预测结果写入 predictions/<date>/ 目录。
 
@@ -508,8 +680,7 @@ def persist_prediction(
     output_dir.mkdir(parents=True, exist_ok=True)
 
     # selection.csv
-    csv_path = output_dir / "selection.csv"
-    selection.to_csv(csv_path, index=False, encoding="utf-8-sig")  # utf-8-sig 兼容 Excel 打开
+    selection.to_csv(output_dir / "selection.csv", index=False, encoding="utf-8-sig")
 
     # pred_score.parquet（全量打分）
     if not pred_score.empty:
@@ -519,8 +690,16 @@ def persist_prediction(
     with (output_dir / "model_meta.json").open("w", encoding="utf-8") as f:
         json.dump(model_meta, f, ensure_ascii=False, indent=2)
 
+    # exclusion_log.json（过滤记录，方便审计）
+    if exclusion_log:
+        with (output_dir / "exclusion_log.json").open("w", encoding="utf-8") as f:
+            json.dump(exclusion_log, f, ensure_ascii=False, indent=2)
+
     # report.html
-    html = _build_report_html(predict_date, selection, pred_score, model_meta, live_cfg)
+    html = _build_report_html(
+        predict_date, selection, pred_score, model_meta, live_cfg,
+        exclusion_log=exclusion_log or [],
+    )
     (output_dir / "report.html").write_text(html, encoding="utf-8")
 
     return output_dir
@@ -536,12 +715,14 @@ def _build_report_html(
     pred_score: pd.Series,
     model_meta: Dict[str, Any],
     live_cfg: Dict[str, Any],
+    exclusion_log: Optional[List[Dict[str, Any]]] = None,
 ) -> str:
     """生成完整 HTML 预测报告。"""
 
     topk_df = selection[selection["change"] != "drop_out"].copy()
     drop_df = selection[selection["change"] == "drop_out"].copy()
     history_html = _build_history_table(predict_date, live_cfg)
+    exclusion_log = exclusion_log or []
 
     def _change_badge(c: str) -> str:
         if c == "new_in":
@@ -607,6 +788,36 @@ def _build_report_html(
       <table>
         <tr><th>股票代码</th><th>今日打分</th><th>今日百分位</th><th>昨日打分</th></tr>
         {drop_rows_html}
+      </table>
+    </div>"""
+
+    # 过滤说明区块
+    filter_section = ""
+    if exclusion_log:
+        filter_rows_html = ""
+        for entry in exclusion_log:
+            replacement = entry.get("replacement") or "—"
+            filter_rows_html += f"""
+        <tr>
+          <td style="font-weight:600">{entry['instrument']}</td>
+          <td style="text-align:center">{entry['original_rank']}</td>
+          <td style="color:{{'ST' in entry['reason'] and '#e67e22' or '#e74c3c'}}">{entry['reason']}</td>
+          <td style="text-align:center;font-weight:600">{replacement}</td>
+        </tr>"""
+        filter_section = f"""
+    <div class="section">
+      <h2>过滤与替换说明</h2>
+      <p style="color:#666;font-size:12px;margin:0 0 12px">
+        以下股票因 ST 风险或连续涨停被从推荐列表中移除，已自动补充得分次高的替代股票。
+      </p>
+      <table>
+        <tr>
+          <th>被排除股票</th>
+          <th>原始排名</th>
+          <th>排除原因</th>
+          <th>替代股票</th>
+        </tr>
+        {filter_rows_html}
       </table>
     </div>"""
 
@@ -721,6 +932,8 @@ def _build_report_html(
       股票存在涨跌停、停牌等情况时可能无法按预期成交。
     </p>
   </div>
+
+  {filter_section}
 
   {drop_section}
 
@@ -922,15 +1135,47 @@ def main() -> None:
         pred_score, tradable_universe, predict_date, run_id
     )
 
-    # ── 选股 ──────────────────────────────────────────────────────
-    print(f"\n  TopK 选股（topk={topk}，score_quantile={score_quantile}）...")
+    # ── 构建过滤器 + 选股 ─────────────────────────────────────────
+    filter_cfg = live_cfg_raw.get("filter", {})
+    exclude_st = filter_cfg.get("exclude_st", True)
+    exclude_limit_up = filter_cfg.get("exclude_limit_up", True)
+    consecutive_limit_days = int(filter_cfg.get("consecutive_limit_days", 3))
+
+    stock_filter = _build_stock_filter(live_cfg_raw)
+    filter_active = (
+        (exclude_st and stock_filter.has_st_data)
+        or (exclude_limit_up and consecutive_limit_days > 0)
+    )
+
+    # 初始选股数量适当扩大（为过滤留出余量），实际以 topk 为准
+    prefetch_k = topk + max(consecutive_limit_days, 3) * 2 if filter_active else topk
+    print(f"\n  TopK 选股（topk={topk}，score_quantile={score_quantile}，预选 {prefetch_k} 支）...")
     selection = select_topk(
         pred_score,
+        predict_date=predict_date,
+        topk=prefetch_k,
+        score_quantile=score_quantile,
+        min_score_threshold=min_score_threshold,
+    )
+
+    # ── 过滤 ST / 连续涨停，补充替代股票 ─────────────────────────
+    print(
+        f"\n  [过滤] ST={exclude_st}（has_data={stock_filter.has_st_data}）"
+        f"  涨停={exclude_limit_up}（阈值={consecutive_limit_days}天）"
+    )
+    selection, exclusion_log = filter_and_refill(
+        selection=selection,
+        pred_score=pred_score,
         predict_date=predict_date,
         topk=topk,
         score_quantile=score_quantile,
         min_score_threshold=min_score_threshold,
+        stock_filter=stock_filter if filter_active else None,
+        exclude_st=exclude_st,
+        exclude_limit_up=exclude_limit_up,
     )
+    if exclusion_log:
+        print(f"  [过滤] 共排除 {len(exclusion_log)} 支，已补充替代股票")
 
     # ── 与前日比较，计算 change 字段 ─────────────────────────────
     prev_selection = load_prev_selection(predict_date)
@@ -943,7 +1188,8 @@ def main() -> None:
 
     # ── 持久化 ─────────────────────────────────────────────────────
     output_dir = persist_prediction(
-        predict_date, selection, pred_score, model_meta, live_cfg_raw
+        predict_date, selection, pred_score, model_meta, live_cfg_raw,
+        exclusion_log=exclusion_log,
     )
 
     # ── 打印结果摘要 ──────────────────────────────────────────────

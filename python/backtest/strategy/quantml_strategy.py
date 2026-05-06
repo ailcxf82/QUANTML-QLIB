@@ -46,6 +46,7 @@ from .exit_rules import (
     renormalize_target,
     strip_exited_symbols,
 )
+from .stock_filter import StockFilter, build_stock_filter
 
 
 class QuantMLWeightStrategy(WeightStrategyBase):
@@ -64,6 +65,11 @@ class QuantMLWeightStrategy(WeightStrategyBase):
             离散控制配 `risk_cfg.max_turnover` 的连续控制可双层防护。
         exit_rules: dict | None 止盈止损，可选键：
             stop_loss_pct / take_profit_pct / trailing_stop_pct（正小数，如 0.08=8%）
+        stock_filter_cfg: dict | None 股票过滤配置，可选键：
+            st_csv_path (str): is_st.csv 路径
+            consecutive_limit_days (int): 连续涨停天数阈值（0=不过滤）
+            exclude_st (bool): 是否过滤 ST，默认 True
+            exclude_limit_up (bool): 是否过滤连续涨停，默认 True
         其它 kwargs 传给父类（signal/trade_exchange/risk_degree 等）
     """
 
@@ -78,6 +84,8 @@ class QuantMLWeightStrategy(WeightStrategyBase):
         risk_cfg: Optional[Dict[str, Any]] = None,
         n_drop: Optional[int] = None,
         exit_rules: Optional[Dict[str, Any]] = None,
+        stock_filter_cfg: Optional[Dict[str, Any]] = None,
+        trade_unit: int = 100,
         **kwargs: Any,
     ) -> None:
         # 校验调仓周期与回看
@@ -112,6 +120,18 @@ class QuantMLWeightStrategy(WeightStrategyBase):
         # 0 与 None 等价：不限制每期换出的票数
         self.n_drop: Optional[int] = n_drop if (n_drop is not None and n_drop > 0) else None
         self._exit_cfg: ExitRulesConfig = parse_exit_rules_cfg(exit_rules)
+
+        # 股票过滤器（ST + 连续涨停）
+        self._stock_filter: Optional[StockFilter] = build_stock_filter(stock_filter_cfg)
+        self._filter_exclude_st: bool = (
+            stock_filter_cfg.get("exclude_st", True) if stock_filter_cfg else True
+        )
+        self._filter_exclude_limit_up: bool = (
+            stock_filter_cfg.get("exclude_limit_up", True) if stock_filter_cfg else True
+        )
+        if not isinstance(trade_unit, int) or trade_unit <= 0:
+            raise ValueError(f"trade_unit 必须为正整数，当前: {trade_unit}")
+        self.trade_unit: int = trade_unit
 
         # 调仓状态
         self._step_counter: int = 0           # 已调用的 trade_step 数
@@ -158,7 +178,50 @@ class QuantMLWeightStrategy(WeightStrategyBase):
             return TradeDecisionWO([], self)
 
         self._pending_model_rebalance = is_model_step
-        return super().generate_trade_decision(execute_result=execute_result)
+        raw_decision = super().generate_trade_decision(execute_result=execute_result)
+        return self._apply_trade_unit_rounding(raw_decision)
+
+    def _apply_trade_unit_rounding(self, decision: Any) -> Any:
+        """
+        将订单股数裁剪到 trade_unit 的整数倍（默认 A 股 100 股一手）。
+
+        规则：
+          - amount < trade_unit 的订单直接丢弃
+          - 其余订单按 floor(amount / trade_unit) * trade_unit 向下取整
+        """
+        if decision is None or TradeDecisionWO is None:
+            return decision
+        order_list = getattr(decision, "order_list", None)
+        if not isinstance(order_list, list) or not order_list:
+            return decision
+
+        rounded_orders: List[Any] = []
+        dropped = 0
+        adjusted = 0
+        for od in order_list:
+            try:
+                amount = float(getattr(od, "amount", 0.0))
+                if amount <= 0:
+                    dropped += 1
+                    continue
+                rounded = int(amount // self.trade_unit) * self.trade_unit
+                if rounded <= 0:
+                    dropped += 1
+                    continue
+                if rounded != int(amount):
+                    adjusted += 1
+                    setattr(od, "amount", rounded)
+                rounded_orders.append(od)
+            except Exception:
+                # 异常订单保守起见直接丢弃，避免提交非法股数
+                dropped += 1
+
+        if adjusted > 0 or dropped > 0:
+            _logger.info(
+                "[trade_unit] unit=%d adjusted=%d dropped=%d original=%d kept=%d",
+                self.trade_unit, adjusted, dropped, len(order_list), len(rounded_orders)
+            )
+        return TradeDecisionWO(rounded_orders, self)
 
     def generate_target_weight_position(
         self,
@@ -308,6 +371,28 @@ class QuantMLWeightStrategy(WeightStrategyBase):
         candidates = self._selector.select(score)
         if not candidates:
             return {}
+
+        # ① ½ 股票过滤（ST + 连续涨停），发生在加权前确保权重干净
+        if self._stock_filter is not None:
+            date_str = trade_start_time.strftime("%Y%m%d")
+            candidates, excluded = self._stock_filter.filter_candidates(
+                candidates,
+                date=date_str,
+                check_st=self._filter_exclude_st,
+                check_limit_up=self._filter_exclude_limit_up,
+            )
+            if excluded:
+                _logger.info(
+                    "[%s] 过滤 %d 支候选: %s",
+                    date_str,
+                    len(excluded),
+                    {k: v[:30] for k, v in excluded.items()},
+                )
+            if not candidates:
+                _logger.warning(
+                    "[%s] 过滤后候选为空，跳过本次调仓", date_str
+                )
+                return {}
 
         # ② 拉取历史收益率（仅用 trade_start_time 之前的数据）
         ret_history = self._fetch_return_history(
@@ -512,16 +597,23 @@ class QuantMLWeightStrategy(WeightStrategyBase):
     # ─────────────────────────────────────────────────────────────────────
 
     def describe(self) -> str:
+        filter_desc = (
+            self._stock_filter.describe()
+            if self._stock_filter is not None
+            else "off"
+        )
         return (
             f"QuantMLWeightStrategy(topk={self.topk}, "
             f"score_q={self.score_quantile:.2f}, "
             f"rebal_freq={self.rebalance_freq}步, "
             f"vol_lookback={self.vol_lookback}日)\n"
-            f"    Selector  : {self._selector.describe()}\n"
-            f"    Weighter  : {self._weighter.describe()}\n"
-            f"    RiskGuard : {self._risk.describe()}\n"
-            f"    NDrop     : {self.n_drop if self.n_drop is not None else 'off'}\n"
-            f"    ExitRules : enabled={self._exit_cfg.is_enabled()} "
+            f"    Selector    : {self._selector.describe()}\n"
+            f"    Weighter    : {self._weighter.describe()}\n"
+            f"    RiskGuard   : {self._risk.describe()}\n"
+            f"    NDrop       : {self.n_drop if self.n_drop is not None else 'off'}\n"
+            f"    StockFilter : {filter_desc}\n"
+            f"    TradeUnit   : {self.trade_unit}\n"
+            f"    ExitRules   : enabled={self._exit_cfg.is_enabled()} "
             f"(sl={self._exit_cfg.stop_loss_pct}, "
             f"tp={self._exit_cfg.take_profit_pct}, "
             f"trail={self._exit_cfg.trailing_stop_pct})"

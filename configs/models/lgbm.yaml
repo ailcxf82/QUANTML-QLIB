@@ -19,20 +19,34 @@ model:
   class: "LGBModel"
   module_path: "qlib.contrib.model.gbdt"
   kwargs:
+    # 实测：huber + CSRankNorm 标签([0,1] 范围) 配合不佳 ——
+    #   huber 的 alpha=0.9 截断阈值在小尺度标签上几乎不触发，
+    #   退化为接近 mse 但收敛慢 8 倍且 test IC 反而下降 15%。
+    # 故仍使用 mse；如果未来希望尝试 huber，需要把标签恢复到 z-score 尺度。
     loss: "mse"
-    early_stopping_rounds: 100
-    num_boost_round: 2000
-    learning_rate: 0.02
-    num_leaves: 63
-    max_depth: 6
-    min_child_samples: 500
-    min_split_gain: 0.001
-    feature_fraction: 0.7
+    # valid 拉长到 2024 全年后，给早停更宽松的窗口，避免在年度风格切换处过早终止。
+    early_stopping_rounds: 200
+    # 学习率减半，配合更高轮数上限（仍由早停截断），获得更平滑的梯度方向。
+    num_boost_round: 5000
+    learning_rate: 0.012
+    # 与 max_depth=5 严格配套：2^5=32，避免叶子表达力远超 ~31 维特征的有效信号。
+    num_leaves: 31
+    max_depth: 5
+    # 低维特征下放宽叶子样本下限，挖掘小簇 alpha；正则与 path_smooth 接管过拟合控制。
+    min_child_samples: 200
+    min_split_gain: 0.0
+    # 特征仅 ~31，提升列采样比例减少信息丢失；feature_fraction_bynode 维持节点级随机。
+    feature_fraction: 0.85
     feature_fraction_bynode: 0.85
-    bagging_fraction: 0.7
-    bagging_freq: 5
-    reg_alpha: 0.1
-    reg_lambda: 1.0
+    bagging_fraction: 0.8
+    # 每轮都触发样本扰动：集成式稳定性最大收益项，对 ICIR 提升关键。
+    bagging_freq: 1
+    reg_alpha: 0.3
+    reg_lambda: 2.0
+    # 节点级随机分裂，对厚尾收益的 IC std 下降很关键。
+    extra_trees: true
+    # 叶子值平滑，跨期预测稳定性更好。
+    path_smooth: 1.0
     seed: 42
     feature_fraction_seed: 42
     bagging_seed: 42

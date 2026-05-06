@@ -31,6 +31,14 @@ live:
   # 换仓提示阈值：当前持仓股票与新推荐偏差超过此分位时，标记为 "建议换仓"
   drop_signal_quantile: 0.3    # 持仓股票打分低于 csi500 内此分位 → 标记 drop_out
 
+# 特殊股票过滤（ST / 连续涨停）
+filter:
+  # ST CSV 路径：自动从 qlib_init.provider_uri/is_st.csv 推断，也可显式指定
+  st_csv_path: "D:/qlib_data/qlib_data/is_st.csv"
+  exclude_st: true           # 过滤所有 ST/*ST 类股票（日限幅仅 ±5%，财务风险高）
+  exclude_limit_up: true     # 过滤连续涨停股票（封单风险，T+1 大概率无法买入）
+  consecutive_limit_days: 3  # 连续涨停天数阈值（0 = 不启用；建议 2~4）
+
 # 模型路径（predict-only 模式使用；retrain-and-predict 模式会覆盖 latest）
 model_store:
   base_dir: "artifacts/models"

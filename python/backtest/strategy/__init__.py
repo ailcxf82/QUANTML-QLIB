@@ -45,6 +45,12 @@ try:
 except ImportError:
     QuantMLWeightStrategy = None  # type: ignore[assignment]
 
+try:
+    from .stock_filter import StockFilter, build_stock_filter
+except ImportError:
+    StockFilter = None  # type: ignore[assignment]
+    build_stock_filter = None  # type: ignore[assignment]
+
 __all__ = [
     "TopKSelector",
     "Weighter",
@@ -55,4 +61,6 @@ __all__ = [
     "build_weighter",
     "RiskConstraints",
     "QuantMLWeightStrategy",
+    "StockFilter",
+    "build_stock_filter",
 ]

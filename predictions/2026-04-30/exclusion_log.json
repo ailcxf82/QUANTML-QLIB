@@ -1,0 +1,44 @@
+[
+  {
+    "instrument": "603095.SH",
+    "reason": "连续涨停 1 天（封单风险，T+1 可能无法买入，泡沫回撤概率高）",
+    "original_rank": 1,
+    "score": 0.3892783901864242,
+    "replacement": null
+  },
+  {
+    "instrument": "603045.SH",
+    "reason": "连续涨停 1 天（封单风险，T+1 可能无法买入，泡沫回撤概率高）",
+    "original_rank": 2,
+    "score": 0.32443011380067494,
+    "replacement": null
+  },
+  {
+    "instrument": "603399.SH",
+    "reason": "连续涨停 1 天（封单风险，T+1 可能无法买入，泡沫回撤概率高）",
+    "original_rank": 3,
+    "score": 0.3079090594853004,
+    "replacement": null
+  },
+  {
+    "instrument": "000609.SZ",
+    "reason": "ST 类股票（日限幅 ±5%，财务风险高，上涨空间受限）",
+    "original_rank": 4,
+    "score": 0.3053304250983111,
+    "replacement": null
+  },
+  {
+    "instrument": "000553.SZ",
+    "reason": "连续涨停 1 天（封单风险，T+1 可能无法买入，泡沫回撤概率高）",
+    "original_rank": 6,
+    "score": 0.24963418840215335,
+    "replacement": null
+  },
+  {
+    "instrument": "603377.SH",
+    "reason": "ST 类股票（日限幅 ±5%，财务风险高，上涨空间受限）",
+    "original_rank": 11,
+    "score": 0.18929015037321154,
+    "replacement": null
+  }
+]

@@ -18,8 +18,9 @@ strategy:
   kwargs:
     topk: 5
     score_quantile: 0.70
-    rebalance_freq: 5
+    rebalance_freq: 1
     vol_lookback: 60
+    trade_unit: 100            # 下单股数按 100 股一手取整（不足 100 股订单丢弃）
     n_drop: 1                 # topk=5 → 单日最多换出 1 只
     weighter_cfg:
       type: "inverse_vol"
@@ -27,10 +28,21 @@ strategy:
         lookback: 60
         min_vol: 0.005
     risk_cfg:
-      max_weight: 0.08
-      sector_max_weight: 0.30
-      max_turnover: 0.30
+      max_weight: 0.30
+      sector_max_weight: 1.0
+      # 放宽日换手率限制：模型 IC≈0.04 的水平下，限制 0.4 会截断每日新发出的优质信号；
+      # 0.7 既保留风控边界，又让模型大部分信号能及时执行。
+      max_turnover: 0.70
     exit_rules:
-      stop_loss_pct: 0.08
-      take_profit_pct: 0.10
-      trailing_stop_pct: 0.06
+      # A 股个股日波动 3~5% 是常态，止损 0.08 在正常震荡中频繁误触发将模型选对的票切在低位；
+      # 0.15 给震荡留出空间，仅在真正趋势反转时触发。
+      stop_loss_pct: 0.15
+      take_profit_pct: 0.50
+      # 移动止损 0.06 极紧，刚选对的票回吐 6% 就被动平仓，吃不到中期趋势；
+      # 0.12 保留趋势捕捉能力，又能在见顶后及时离场。
+      trailing_stop_pct: 0.12
+    stock_filter_cfg:
+      st_csv_path: "D:/qlib_data/qlib_data/is_st.csv"
+      consecutive_limit_days: 1   # 连续涨停天数阈值（0 = 不过滤涨停）
+      exclude_st: true            # 回测中禁止持有 ST 类股票
+      exclude_limit_up: true      # 回测中禁止买入连续涨停股票
