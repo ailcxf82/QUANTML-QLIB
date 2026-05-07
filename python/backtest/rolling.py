@@ -115,6 +115,7 @@ def build_walk_forward_folds(
     step: str = "6m",
     purge_days: int = 2,
     embargo_days: int = 5,
+    oos_start: Optional[str] = None,
 ) -> List[FoldSpec]:
     """生成扩展窗口 Walk-Forward 切分序列。
 
@@ -127,6 +128,8 @@ def build_walk_forward_folds(
         step:         每 fold 向后滑动的步长（如 "6m"），通常 = test_size
         purge_days:   train_end 距 valid_start 的 gap（纯日历日），防 label 泄漏
         embargo_days: purge 后额外 embargo（应对特征自相关）
+        oos_start:    可选的 OOS 起始日（如 "2025-01-01"）。设置后，第一个 fold 的
+                      test_start 会被抬高到该日期（若该日期晚于默认起点）。
 
     Returns:
         FoldSpec 列表；若数据不够第一个 fold 则返回 []。
@@ -158,6 +161,8 @@ def build_walk_forward_folds(
     # test_start 从 "最小训练 + gap + valid" 开始，每次滑 step
     # 即 fold1.test_start = ts_start + train_min + gap + valid_size
     first_test_start = ts_start + off_train_min + gap + off_valid
+    if oos_start:
+        first_test_start = max(first_test_start, pd.Timestamp(oos_start))
     test_start = first_test_start
 
     while True:

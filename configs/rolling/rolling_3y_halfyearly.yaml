@@ -1,0 +1,9 @@
+rolling:
+  mode: walk_forward
+  oos_start: "2025-01-01"
+  train_min: "3y"
+  valid_size: "6m"
+  test_size: "6m"
+  step: "6m"
+  purge_days: 2
+  embargo_days: 5

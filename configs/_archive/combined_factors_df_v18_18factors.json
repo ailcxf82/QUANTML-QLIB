@@ -1,0 +1,185 @@
+{
+  "created_at": "2026-05-07 10:50:00",
+  "script": "manual_curation_from_combined_factors_df_expressions.md",
+  "mode": "curated",
+  "base_strict_run": "2026-04-29 08:53:39",
+  "start": "2020-01-01",
+  "end": "2026-04-27",
+  "instruments": "csi500",
+  "ic_threshold": 0.02,
+  "max_nan_ratio": 0.5,
+  "oos_cutoff": "2024-12-31",
+  "ic_ir_threshold": 0.3,
+  "max_corr_vs_lgb": 0.7,
+  "max_corr_among_selected": 0.7,
+  "n_segments": 12,
+  "n_factors": 18,
+  "shape": [
+    720415,
+    18
+  ],
+  "policy": {
+    "baseline": "保留 strict-mode 严格筛选出的 6 个原始因子，作为 LGBM IC=0.04 已验证基线",
+    "new_high_ic": "新增 IC>=0.10 的 9 个价量结构因子（来自 combined_factors_df_expressions.md，IC 由 RDAgent 离线评估）",
+    "new_orthogonal": "新增 3 个与 baseline 6 因子语义独立的维度补强（IC 0.07~0.12）",
+    "expected_total_features": "26 内置 + 18 combined = 44 维",
+    "rationale": "RDAgent IC 是基于其内部标签估计，本项目 label=Ref(close,-2)/Ref(close,-1)-1 下实际 IC 会显著低于 markdown 数值；保留 baseline 6 个可在最坏情况下兜底，新增因子只会净增信息（除非高度共线，已通过 max_abs_corr_vs_lgb 历史检查粗筛）"
+  },
+  "factors": [
+    {
+      "name": "ValueMR_20D",
+      "ic": 0.158247,
+      "nan_ratio": 0.0855,
+      "ic_in_mean": 0.155653,
+      "ic_in_std": 0.023179,
+      "ic_in_ir": 6.7153,
+      "ic_oos": 0.152561,
+      "max_abs_corr_vs_lgb": 0.6967,
+      "argmax_lgb_col": "Ref($rsi_qfq_12, 1)",
+      "source": "baseline_strict"
+    },
+    {
+      "name": "volume_zscore_20d",
+      "ic": 0.104792,
+      "nan_ratio": 0.0177,
+      "ic_in_mean": 0.104403,
+      "ic_in_std": 0.023521,
+      "ic_in_ir": 4.4387,
+      "ic_oos": 0.104431,
+      "max_abs_corr_vs_lgb": 0.3619,
+      "argmax_lgb_col": "Ref($volume_ratio, 1)",
+      "source": "baseline_strict"
+    },
+    {
+      "name": "turnover_acceleration_5d",
+      "ic": 0.034879,
+      "nan_ratio": 0.009,
+      "ic_in_mean": 0.040194,
+      "ic_in_std": 0.017305,
+      "ic_in_ir": 2.3227,
+      "ic_oos": 0.013671,
+      "max_abs_corr_vs_lgb": 0.4266,
+      "argmax_lgb_col": "Ref($volume_ratio, 1)",
+      "source": "baseline_strict"
+    },
+    {
+      "name": "volume_ratio_ma_15d",
+      "ic": 0.034452,
+      "nan_ratio": 0.0143,
+      "ic_in_mean": 0.035993,
+      "ic_in_std": 0.0337,
+      "ic_in_ir": 1.0681,
+      "ic_oos": 0.021168,
+      "max_abs_corr_vs_lgb": 0.3844,
+      "argmax_lgb_col": "Ref($macd_qfq, 1)",
+      "source": "baseline_strict"
+    },
+    {
+      "name": "roe_momentum_60d",
+      "ic": 0.039711,
+      "nan_ratio": 0.0416,
+      "ic_in_mean": 0.033461,
+      "ic_in_std": 0.055115,
+      "ic_in_ir": 0.6071,
+      "ic_oos": 0.04973,
+      "max_abs_corr_vs_lgb": 0.5273,
+      "argmax_lgb_col": "Ref($roe, 1)",
+      "source": "baseline_strict"
+    },
+    {
+      "name": "quarterly_eps",
+      "ic": 0.021574,
+      "nan_ratio": 0.0,
+      "ic_in_mean": 0.019697,
+      "ic_in_std": 0.033305,
+      "ic_in_ir": 0.5914,
+      "ic_oos": 0.028735,
+      "max_abs_corr_vs_lgb": 0.648,
+      "argmax_lgb_col": "Ref($roe, 1)",
+      "source": "baseline_strict"
+    },
+    {
+      "name": "rank_close_open",
+      "ic": 0.351996,
+      "nan_ratio": 0.0012,
+      "source": "rdagent_ic_top",
+      "note": "Qlib 表达式不支持截面 rank，已降级为 close_qfq/open_qfq 比值，CSZScoreNorm 后等价"
+    },
+    {
+      "name": "close_location",
+      "ic": 0.345314,
+      "nan_ratio": 0.0012,
+      "source": "rdagent_ic_top"
+    },
+    {
+      "name": "log_signed_volume",
+      "ic": 0.333128,
+      "nan_ratio": 0.0012,
+      "source": "rdagent_ic_top",
+      "note": "Sign($close-$open)*Log($volume+1)，资金流向方向 × 量级"
+    },
+    {
+      "name": "close_location_turnover_wt",
+      "ic": 0.264197,
+      "nan_ratio": 0.0013,
+      "source": "rdagent_ic_top",
+      "note": "close_location × 流通换手率，活跃度加权的日内位置"
+    },
+    {
+      "name": "close_location_ma_5",
+      "ic": 0.134236,
+      "nan_ratio": 0.005,
+      "source": "rdagent_ic_top",
+      "note": "close_location 5 日平滑，缓解单日噪声"
+    },
+    {
+      "name": "roe_momentum_5d_interaction",
+      "ic": 0.127711,
+      "nan_ratio": 0.0034,
+      "source": "rdagent_ic_top",
+      "note": "降级为时序乘积 $roe*(close/Ref(close,5)-1)，截面 rank 由 CSZScoreNorm 完成"
+    },
+    {
+      "name": "vol_surge_5d",
+      "ic": 0.114230,
+      "nan_ratio": 0.0059,
+      "source": "rdagent_ic_top",
+      "note": "$volume/Ref(Mean($volume,5),1)，相对前 5 日均量的放量倍数"
+    },
+    {
+      "name": "earnings_yield_momentum_5d_interaction",
+      "ic": 0.111687,
+      "nan_ratio": 0.0246,
+      "source": "rdagent_ic_top",
+      "note": "(1/PE_TTM) × 5 日动量，价值 + 短期动量交互"
+    },
+    {
+      "name": "quality_value_momentum_5d_composite",
+      "ic": 0.101037,
+      "nan_ratio": 0.0246,
+      "source": "rdagent_ic_top",
+      "note": "ROE × (1/PE_TTM) × 5 日动量，三因子时序乘积"
+    },
+    {
+      "name": "volume_ratio",
+      "ic": 0.114528,
+      "nan_ratio": 0.0018,
+      "source": "rdagent_ic_orthogonal",
+      "note": "$volume_ratio 原始字段，与 baseline 中 volume_ratio_ma_15d 的 15 日平滑互补"
+    },
+    {
+      "name": "turnover_surprise_20",
+      "ic": 0.096589,
+      "nan_ratio": 0.0188,
+      "source": "rdagent_ic_orthogonal",
+      "note": "当日换手 / 20 日均换手，与 baseline turnover_acceleration_5d (5/10 口径) 的 20 日长周期补强"
+    },
+    {
+      "name": "pb_pct_change_20d",
+      "ic": 0.074312,
+      "nan_ratio": 0.0136,
+      "source": "rdagent_ic_orthogonal",
+      "note": "$pb 20 日涨跌幅，估值动量维度（baseline 中无估值时序变化类因子）"
+    }
+  ]
+}

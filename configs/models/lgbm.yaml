@@ -30,23 +30,23 @@ model:
     num_boost_round: 5000
     learning_rate: 0.012
     # 与 max_depth=5 严格配套：2^5=32，避免叶子表达力远超 ~31 维特征的有效信号。
-    num_leaves: 31
-    max_depth: 5
+    num_leaves: 31   # 31 → 47
+    max_depth: 5        # 5 → 6
     # 低维特征下放宽叶子样本下限，挖掘小簇 alpha；正则与 path_smooth 接管过拟合控制。
-    min_child_samples: 200
+    min_child_samples: 200  # 200 → 350
     min_split_gain: 0.0
     # 特征仅 ~31，提升列采样比例减少信息丢失；feature_fraction_bynode 维持节点级随机。
-    feature_fraction: 0.85
-    feature_fraction_bynode: 0.85
-    bagging_fraction: 0.8
+    feature_fraction: 0.85  # 0.85 → 0.65
+    feature_fraction_bynode: 0.85     # 0.85 → 0.65
+    bagging_fraction: 0.7
     # 每轮都触发样本扰动：集成式稳定性最大收益项，对 ICIR 提升关键。
     bagging_freq: 1
     reg_alpha: 0.3
-    reg_lambda: 2.0
+    reg_lambda: 2.0         # 2.0 → 5.0
     # 节点级随机分裂，对厚尾收益的 IC std 下降很关键。
     extra_trees: true
     # 叶子值平滑，跨期预测稳定性更好。
-    path_smooth: 1.0
+    path_smooth: 2.0
     seed: 42
     feature_fraction_seed: 42
     bagging_seed: 42

@@ -118,6 +118,8 @@ _FREQ_ALIASES: Dict[str, str] = {
     "day": "daily",
     "1day": "daily",
     "d": "daily",
+    "daily_prod": "daily_prod",
+    "prod": "daily_prod",
     "minute": "minute",
     "min": "minute",
     "1min": "minute",
@@ -673,8 +675,31 @@ def persist_artifacts(
             # 写入 model_meta.json（训练截止日、特征数等，供 predict_live.py 校验）
             train_seg = cfg.get("dataset", {}).get("kwargs", {}).get("segments", {}).get("train", [])
             train_end = train_seg[1] if len(train_seg) >= 2 else "unknown"
-            n_features = cfg.get("model", {}).get("kwargs", {}).get("input_dim") or \
-                         cfg.get("model", {}).get("kwargs", {}).get("d_feat")
+            # 优先从 data_loader 注入后的 feature 列表推导（适配所有模型，包括 LGBM）；
+            # 退回到模型 kwargs 中的 input_dim / d_feat（仅 MLP / 时序模型有）。
+            try:
+                feature_block = (
+                    cfg.get("dataset", {})
+                    .get("kwargs", {})
+                    .get("handler", {})
+                    .get("kwargs", {})
+                    .get("data_loader", {})
+                    .get("kwargs", {})
+                    .get("config", {})
+                    .get("feature", [])
+                )
+                n_features = (
+                    len(feature_block[1])
+                    if isinstance(feature_block, (list, tuple)) and len(feature_block) >= 2
+                    else None
+                )
+            except Exception:  # pragma: no cover - 防御式
+                n_features = None
+            if n_features is None:
+                n_features = (
+                    cfg.get("model", {}).get("kwargs", {}).get("input_dim")
+                    or cfg.get("model", {}).get("kwargs", {}).get("d_feat")
+                )
             model_meta = {
                 "run_id": run_ctx.run_id,
                 "model": model_name,
@@ -904,6 +929,7 @@ def run_walk_forward(
         step=str(rolling_params.get("step", "6m")),
         purge_days=int(purge_days),
         embargo_days=int(rolling_params.get("embargo_days", 5)),
+        oos_start=str(rolling_params.get("oos_start", "2025-01-01")),
     )
 
     if not folds:

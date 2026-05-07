@@ -1,0 +1,32 @@
+# 日频生产训练配置：尽可能使用最新可得历史训练，
+# 并保留最近两个月作为上线前 sanity backtest。
+
+freq_meta:
+  name: "daily_prod"
+  freq_key: "1day"
+
+# P2 目标：
+# - train 用到 2025 年底，贴近当前市场结构
+# - valid 用 2026Q1 做早停，避免过拟合旧风格
+# - test 保留 2026-03~2026-04 做上线前 sanity 检查
+dataset_segments:
+  train: ["2020-01-01", "2025-12-31"]
+  valid: ["2026-01-01", "2026-02-28"]
+  test:  ["2026-03-01", "2026-04-28"]
+
+executor:
+  class: "SimulatorExecutor"
+  module_path: "qlib.backtest.executor"
+  kwargs:
+    time_per_step: "day"
+    generate_portfolio_metrics: true
+
+backtest:
+  exchange_kwargs:
+    freq: "day"
+    limit_threshold: 0.095
+    deal_price: "close"
+    open_cost: 0.0025
+    close_cost: 0.0035
+    min_cost: 5
+    impact_cost: 0

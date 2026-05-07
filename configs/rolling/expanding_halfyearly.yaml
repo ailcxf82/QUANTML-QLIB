@@ -13,6 +13,7 @@
 
 rolling:
   mode: walk_forward          # 仅支持 walk_forward（未来可扩展 sliding_window）
+  oos_start: "2025-01-01"     # OOS 回测起始日（含）；会跳过更早的 test fold
   train_min: "4y"             # 最小训练窗口：第一个 fold 的训练集至少 4 年
   valid_size: "6m"            # 每 fold 验证集（用于 LGBM 早停）
   test_size: "6m"             # 每 fold OOS 测试集（最后一个 fold 由 data_end 截断）
