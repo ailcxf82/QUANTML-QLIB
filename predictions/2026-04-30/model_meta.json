@@ -1,9 +1,9 @@
 {
-  "run_id": "lgbm_daily_d420c812",
+  "run_id": "lgbm_daily_prod_314ec0c8",
   "model": "lgbm",
-  "freq": "daily",
-  "train_end": "2024-06-30",
-  "n_features": null,
-  "saved_at": "2026-05-05T21:38:50.886471",
+  "freq": "daily_prod",
+  "train_end": "2025-12-31",
+  "n_features": 38,
+  "saved_at": "2026-05-07T22:19:33.550568",
   "version": "v2"
 }

@@ -1,44 +1,65 @@
 [
   {
-    "instrument": "603095.SH",
-    "reason": "连续涨停 1 天（封单风险，T+1 可能无法买入，泡沫回撤概率高）",
-    "original_rank": 1,
-    "score": 0.3892783901864242,
-    "replacement": null
-  },
-  {
-    "instrument": "603045.SH",
-    "reason": "连续涨停 1 天（封单风险，T+1 可能无法买入，泡沫回撤概率高）",
-    "original_rank": 2,
-    "score": 0.32443011380067494,
-    "replacement": null
-  },
-  {
-    "instrument": "603399.SH",
-    "reason": "连续涨停 1 天（封单风险，T+1 可能无法买入，泡沫回撤概率高）",
-    "original_rank": 3,
-    "score": 0.3079090594853004,
-    "replacement": null
-  },
-  {
     "instrument": "000609.SZ",
-    "reason": "ST 类股票（日限幅 ±5%，财务风险高，上涨空间受限）",
+    "reason": "ST 类股票（日限幅 ±5%，财务风险高）",
+    "original_rank": 1,
+    "score": 1.0056851578725472,
+    "replacement": "001218.SZ"
+  },
+  {
+    "instrument": "600381.SH",
+    "reason": "ST 类股票（日限幅 ±5%，财务风险高）",
     "original_rank": 4,
-    "score": 0.3053304250983111,
-    "replacement": null
+    "score": 0.5765879457617887,
+    "replacement": "920273.BJ"
   },
   {
-    "instrument": "000553.SZ",
-    "reason": "连续涨停 1 天（封单风险，T+1 可能无法买入，泡沫回撤概率高）",
+    "instrument": "600730.SH",
+    "reason": "ST 类股票（日限幅 ±5%，财务风险高）",
+    "original_rank": 5,
+    "score": 0.5625047026606279,
+    "replacement": "920943.BJ"
+  },
+  {
+    "instrument": "603843.SH",
+    "reason": "ST 类股票（日限幅 ±5%，财务风险高）",
     "original_rank": 6,
-    "score": 0.24963418840215335,
+    "score": 0.527876960659368,
     "replacement": null
   },
   {
-    "instrument": "603377.SH",
-    "reason": "ST 类股票（日限幅 ±5%，财务风险高，上涨空间受限）",
+    "instrument": "603580.SH",
+    "reason": "ST 类股票（日限幅 ±5%，财务风险高）",
+    "original_rank": 7,
+    "score": 0.525229927501525,
+    "replacement": null
+  },
+  {
+    "instrument": "002289.SZ",
+    "reason": "ST 类股票（日限幅 ±5%，财务风险高）",
+    "original_rank": 8,
+    "score": 0.5092453186213555,
+    "replacement": null
+  },
+  {
+    "instrument": "603095.SH",
+    "reason": "连续涨停 3 天（封单风险，T+1 可能无法买入）",
+    "original_rank": 9,
+    "score": 0.4662326842273677,
+    "replacement": null
+  },
+  {
+    "instrument": "603398.SH",
+    "reason": "ST 类股票（日限幅 ±5%，财务风险高）",
+    "original_rank": 10,
+    "score": 0.45935352594066226,
+    "replacement": null
+  },
+  {
+    "instrument": "603272.SH",
+    "reason": "ST 类股票（日限幅 ±5%，财务风险高）",
     "original_rank": 11,
-    "score": 0.18929015037321154,
+    "score": 0.43595862446197337,
     "replacement": null
   }
 ]

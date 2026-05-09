@@ -283,9 +283,11 @@ def filter_to_universe(
     if not universe or universe.lower() == "all":
         return pred_score
     try:
-        import qlib
         from qlib.data import D
-        inst_cfg = {"market": universe}
+
+        # 关键修复：先用 D.instruments(universe) 构造标准 instruments 配置，
+        # 避免直接传 {"market": "..."} 触发缺少 filter_pipe 的异常并回退全市场。
+        inst_cfg = D.instruments(universe)
         tradable = D.list_instruments(
             inst_cfg, start_time=predict_date, end_time=predict_date, as_list=True
         )
