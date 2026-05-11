@@ -25,7 +25,7 @@
 """
 from __future__ import annotations
 
-import json
+import warnings
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Optional
@@ -149,9 +149,37 @@ class BacktestEngine:
         # 调用 Qlib 回测引擎
         # ──────────────────────────────────────────────────────────────────
         exp_cfg = cfg["experiment"]
+        test_seg = cfg["dataset"]["kwargs"]["segments"]["test"]
+        # Qlib TradeCalendar.get_step_time 会访问 _calendar[end_index + 1]；若 end_time
+        # 为 Cal.calendar 的最后交易日，会 IndexError。
+        # 将 qlib_backtest 的闭合 end 裁到全局倒数第二个交易日，使最后一步仍有“下一根”栏位。
+        qlib_bt_end = str(test_seg[1])
+        try:
+            from qlib.data.data import Cal as _Cal
+
+            _cal_np = _Cal.calendar(freq=freq_key, future=True)
+            _en_ts = pd.Timestamp(test_seg[1])
+            _last_ts = pd.Timestamp(_cal_np[-1])
+            if len(_cal_np) >= 2 and _en_ts >= _last_ts:
+                qlib_bt_end = str(pd.Timestamp(_cal_np[-2]))
+                warnings.warn(
+                    (
+                        f"qlib_backtest: end_time 已从 dataset.test 末端 {test_seg[1]!r} "
+                        f"裁到 {qlib_bt_end!r}。"
+                        "原因：Qlib 在最后一个交易日仍需要日历上的下一根 bar；"
+                        "当 test 末端等于数据日历最后交易日时否则会 IndexError。"
+                        "最后 1 个交易日不会进入撮合回测（metrics 略短 1 日）。"
+                    ),
+                    UserWarning,
+                    stacklevel=1,
+                )
+        except Exception:
+            pass
+
+        # 开始日与 dataset.test 对齐；结束日见 qlib_bt_end（与 experiment.end_time 无关）。
         portfolio_metric_dict, indicator_dict = qlib_backtest(
-            start_time=cfg["dataset"]["kwargs"]["segments"]["test"][0],
-            end_time=exp_cfg["end_time"],
+            start_time=test_seg[0],
+            end_time=qlib_bt_end,
             strategy=strategy_obj if strategy_obj is not None else strategy_config,
             executor=executor_config,
             benchmark=exp_cfg["benchmark"],

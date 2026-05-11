@@ -1,0 +1,43 @@
+{
+  "created_at": "2026-05-09 20:30:00",
+  "purpose": "把 configs/combined_factors_df_expressions_new.md 的全部 15 个因子叠到 base 上做独立测试，看 new.md 整套相对纯 base 的真实边际贡献，避开 lgbm_ext 实验中被 v18-v2 强因子掩盖的合奏陷阱。",
+  "compare_to": "base_only",
+  "n_factors": 15,
+  "expected_total_features": "20 base + 15 combined = 35 维",
+  "v18_v2_overlap": [
+    "log_signed_volume",
+    "close_location",
+    "rank_close_open",
+    "ValueMR_20D",
+    "earnings_yield_momentum_5d_interaction",
+    "turnover_surprise_20",
+    "volume_ratio_ma_15d",
+    "roe_momentum_60d"
+  ],
+  "rationale": [
+    "保持与 new.md 顺序一致，便于结果复盘时对照原始 IC 报告",
+    "其中 8 个因子（v18_v2_overlap）已是 v18-v2 生产配置的一部分，本次叠加在 base 上看的是'整套裸效'而非增量",
+    "另外 7 个为 v18-v2 之外的新候选；上一次 lgbm_ext 在 v18-v2 之上的合奏被 WF 拒绝（IR -35.4%），但 base 之上的边际尚未单测，这次补齐"
+  ],
+  "warning": [
+    "本配置不参与生产；产物自动隔离到 latest_lgbm_lab_new_md_full15_daily.pkl",
+    "若 IR vs base_only 退化超过 5%，则放弃 WF 验证以节省 14 分钟成本"
+  ],
+  "factors": [
+    { "name": "log_signed_volume" },
+    { "name": "close_location" },
+    { "name": "rank_close_open" },
+    { "name": "ValueMR_20D" },
+    { "name": "winsorized_zscore_volume_ratio" },
+    { "name": "roe_momentum_5d_interaction" },
+    { "name": "close_location_ma_5" },
+    { "name": "earnings_yield_momentum_5d_interaction" },
+    { "name": "turnover_surprise_20" },
+    { "name": "sma_volume_ratio_5d" },
+    { "name": "sma_volume_ratio_10d" },
+    { "name": "volume_ratio_ma_15d" },
+    { "name": "sma_dv_ratio_10d" },
+    { "name": "intraday_range" },
+    { "name": "roe_momentum_60d" }
+  ]
+}

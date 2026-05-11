@@ -12,7 +12,7 @@ freq_meta:
 dataset_segments:
   train: ["2020-01-01", "2023-12-31"]
   valid: ["2024-01-01", "2024-12-31"]
-  test:  ["2025-01-01", "2026-04-28"]
+  test:  ["2025-01-01", "2026-05-07"]
 
 executor:
   class: "SimulatorExecutor"

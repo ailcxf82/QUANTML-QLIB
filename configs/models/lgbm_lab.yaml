@@ -1,0 +1,66 @@
+# LightGBM 因子实验台模型配置（lgbm_lab）
+#
+# 与 lgbm.yaml 仅两处差异：
+#   1) model_meta.name 默认 "lgbm_lab"，运行时被 --lab <name> 改写为
+#      "lgbm_lab_<name>"，让 persist_artifacts 自动落到独立的
+#      latest_lgbm_lab_<name>_daily.pkl，与生产线 latest_lgbm_daily.pkl 完全隔离。
+#   2) combined_factors_json 默认空（~），由 run_experiment.py 在加载完
+#      yaml 之后按 --lab 解析为 configs/factor_lab/<name>.json。
+#
+# LGBM 超参 **完全沿用 lgbm.yaml**（保证因子层面对比公平，不引入超参变量）。
+#
+# 用途：
+#   "因子实验台"——不影响 v18-v2 生产线的前提下，快速验证任意"base + 自选因子白名单"
+#   组合的单切分 / WF 表现，并通过 python/factor_lab.py compare 自动入对比表。
+#
+# 典型用法：
+#   python python/run_experiment.py --model lgbm_lab --freq daily --lab base_only
+#   python python/run_experiment.py --model lgbm_lab --freq daily --lab new_md_full15
+#
+# 产物隔离：
+#   - artifacts/lgbm_lab_<name>_daily_<run_id>/
+#   - artifacts/models/latest_lgbm_lab_<name>_daily.pkl
+#   - artifacts/models/latest_lgbm_lab_<name>_daily_meta.json (含 lab_name 字段)
+#
+# 不会影响：
+#   - artifacts/models/latest_lgbm_daily.pkl       (v18-v2 生产模型)
+#   - artifacts/models/latest_lgbm_ext_daily.pkl   (lgbm_ext 历史增量实验)
+#   - configs/combined_factors_df.json             (v18-v2 生产配置)
+#   - predict_live.py 仍读 latest_lgbm_daily.pkl，与本实验完全解耦。
+
+model_meta:
+  name: "lgbm_lab"
+  dataset_type: "flat"
+  freq_key: "1day"
+  feature_groups: ~
+  # 留空：运行时由 --lab <name> 注入 configs/factor_lab/<name>.json，
+  # 或在 --lab base_only 时保持为 None 以走纯 base 基线。
+  combined_factors_json: ~
+
+model:
+  class: "LGBModel"
+  module_path: "qlib.contrib.model.gbdt"
+  kwargs:
+    loss: "mse"
+    early_stopping_rounds: 200
+    num_boost_round: 5000
+    learning_rate: 0.012
+    num_leaves: 31
+    max_depth: 5
+    min_child_samples: 200
+    min_split_gain: 0.0
+    feature_fraction: 0.85
+    feature_fraction_bynode: 0.85
+    bagging_fraction: 0.7
+    bagging_freq: 1
+    reg_alpha: 0.3
+    reg_lambda: 2.0
+    extra_trees: true
+    path_smooth: 2.0
+    seed: 42
+    feature_fraction_seed: 42
+    bagging_seed: 42
+    data_random_seed: 42
+    deterministic: true
+    force_col_wise: true
+    num_threads: -1

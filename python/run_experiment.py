@@ -101,6 +101,16 @@ _MODEL_ALIASES: Dict[str, str] = {
     "lgbm": "lgbm",
     "lightgbm": "lgbm",
     "gbdt": "lgbm",
+    # lgbm_ext: 与 lgbm 同模型类，仅 combined_factors_json 不同（增量实验专用）
+    # 不会覆盖 latest_lgbm_daily.pkl，产物隔离到 latest_lgbm_ext_daily.pkl
+    "lgbm_ext": "lgbm_ext",
+    "lgbmext": "lgbm_ext",
+    # lgbm_lab: 因子实验台（base + 自选因子白名单）。
+    # 必须配合 --lab <name> 使用，运行时把 configs/factor_lab/<name>.json 注入
+    # 到 model_meta.combined_factors_json，并把 model_meta.name 改写为 lgbm_lab_<name>，
+    # 实现产物完全隔离（latest_lgbm_lab_<name>_daily.pkl）。
+    "lgbm_lab": "lgbm_lab",
+    "lgbmlab": "lgbm_lab",
     # mlp
     "mlp": "mlp",
     "dnn": "mlp",
@@ -709,6 +719,20 @@ def persist_artifacts(
                 "saved_at": pd.Timestamp.now().isoformat(),
                 "version": VERSION,
             }
+            # 透传因子实验台审计字段（仅 lgbm_lab 路径会带）：
+            # lab_name 供 factor_lab.py compare 识别，combined_factors_json 留作审计来源
+            lab_name_for_meta = cfg.get("model_meta", {}).get("lab_name")
+            if lab_name_for_meta:
+                model_meta["lab_name"] = lab_name_for_meta
+            combined_json_for_meta = cfg.get("model_meta", {}).get("combined_factors_json")
+            if combined_json_for_meta:
+                model_meta["combined_factors_json"] = combined_json_for_meta
+            # 把 metrics 也写入 latest meta，供 factor_lab.py compare 一站式拉指标
+            # （metrics.json 在 run 目录里，但 latest meta 直接放摘要可避免对比脚本扫多个目录）
+            if metrics:
+                model_meta["metrics"] = dict(metrics)
+            if rolling_meta is not None:
+                model_meta["rolling"] = rolling_meta
             with (run_ctx.output_dir / "model_meta.json").open("w", encoding="utf-8") as f:
                 json.dump(model_meta, f, ensure_ascii=False, indent=2)
 
@@ -1147,6 +1171,16 @@ def main() -> None:
             "不传则使用 base.yaml 默认的 TopkDropoutStrategy。"
         ),
     )
+    parser.add_argument(
+        "--lab",
+        default=None,
+        help=(
+            "[仅 --model lgbm_lab 时生效] 因子实验台白名单名（不带后缀）。"
+            "运行时映射到 configs/factor_lab/<lab>.json，并把 model_meta.name 改写为 "
+            "lgbm_lab_<lab>，产物隔离到 latest_lgbm_lab_<lab>_daily.pkl。"
+            "特殊值 base_only：跳过 combined_json 加载，纯 20 维 base 因子（基线）。"
+        ),
+    )
 
     # ── Walk-Forward 参数（rolling 模式） ───────────────────────────
     parser.add_argument(
@@ -1192,6 +1226,45 @@ def main() -> None:
         strategy_cfg_path=args.strategy_cfg,
     )
     cfg = patch_dataset_class(cfg)
+
+    # ── 因子实验台 (lgbm_lab) 注入 ─────────────────────────────────
+    # 仅当模型解析到 lgbm_lab 时启用：
+    #   1) --lab 必填，否则报错（避免误用默认 base_only 跑出非预期产物）
+    #   2) 把 configs/factor_lab/<lab>.json 注入到 model_meta.combined_factors_json
+    #      （base_only 是哨兵值，不加载 json，纯 20 维 base 基线）
+    #   3) 把 model_meta.name 改写为 lgbm_lab_<lab>，让 persist_artifacts 自动落到
+    #      latest_lgbm_lab_<lab>_daily.pkl，与生产线 latest_lgbm_daily.pkl 完全隔离
+    #   4) 写入 model_meta.lab_name 供 factor_lab.py compare 识别
+    resolved_model = cfg.get("model_meta", {}).get("name", "")
+    if resolved_model == "lgbm_lab":
+        if not args.lab:
+            raise ValueError(
+                "--model lgbm_lab 必须搭配 --lab <name>。"
+                " 可选值：base_only（基线，无 combined_json）"
+                " 或 configs/factor_lab/ 下任一 <name>.json 的 stem。"
+            )
+        lab_name = args.lab.strip()
+        cfg.setdefault("model_meta", {})
+        cfg["model_meta"]["name"] = f"lgbm_lab_{lab_name}"
+        cfg["model_meta"]["lab_name"] = lab_name
+        # 同步改写 experiment.run_id，让 run 目录也带 lab 后缀
+        # （否则 run 目录是 lgbm_lab_daily_*，与 latest_lgbm_lab_<lab>_daily.pkl
+        #  命名不一致，factor_lab.py 扫描 rolling_summary 的 glob 抓不到 WF run）
+        freq_normalized = _normalize_freq(args.freq) if args.freq else "daily"
+        cfg.setdefault("experiment", {})["run_id"] = f"lgbm_lab_{lab_name}_{freq_normalized}"
+        if lab_name == "base_only":
+            # 哨兵值：不加载任何 combined_json，纯 base 因子
+            cfg["model_meta"]["combined_factors_json"] = None
+        else:
+            lab_json_path = f"configs/factor_lab/{lab_name}.json"
+            abs_path = WORKSPACE_ROOT / lab_json_path
+            if not abs_path.exists():
+                raise FileNotFoundError(
+                    f"--lab '{lab_name}' 对应的因子白名单文件不存在：{abs_path}。"
+                    f" 请先在 configs/factor_lab/ 创建 {lab_name}.json。"
+                )
+            cfg["model_meta"]["combined_factors_json"] = lab_json_path
+
     cfg = inject_feature_config(cfg)
 
     # ── ensemble 超参临时覆盖（CLI > 配置文件） ─────────────────────

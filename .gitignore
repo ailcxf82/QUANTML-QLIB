@@ -1,6 +1,7 @@
 # 大目录产物（数据/实验/工件）
 mlruns/
 artifacts/
+predictions/
 
 # Python 字节码缓存
 __pycache__/

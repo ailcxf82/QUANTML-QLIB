@@ -1,0 +1,48 @@
+# LightGBM 增量实验模型配置（lgbm_ext）
+#
+# 与 lgbm.yaml 唯一差异：combined_factors_json 指向 extension（25 因子）
+# 用途：在不影响生产基线 v18-v2 (lgbm.yaml + combined_factors_df.json) 的前提下
+#       做"v18-v2 + new.md 7 个新候选"的对照实验
+# 产物隔离：
+#   - artifacts/lgbm_ext_daily_<run_id>/
+#   - artifacts/models/latest_lgbm_ext_daily.pkl
+#   - artifacts/models/latest_lgbm_ext_daily_meta.json
+# 不会影响:
+#   - artifacts/models/latest_lgbm_daily.pkl (v18-v2 生产模型)
+#   - configs/combined_factors_df.json (v18-v2 生产配置)
+#   - predict_live.py 仍读 latest_lgbm_daily.pkl，与本实验完全解耦
+
+model_meta:
+  name: "lgbm_ext"
+  dataset_type: "flat"
+  freq_key: "1day"
+  feature_groups: ~
+  combined_factors_json: "configs/combined_factors_df_extension.json"
+
+model:
+  class: "LGBModel"
+  module_path: "qlib.contrib.model.gbdt"
+  kwargs:
+    loss: "mse"
+    early_stopping_rounds: 200
+    num_boost_round: 5000
+    learning_rate: 0.012
+    num_leaves: 31
+    max_depth: 5
+    min_child_samples: 200
+    min_split_gain: 0.0
+    feature_fraction: 0.85
+    feature_fraction_bynode: 0.85
+    bagging_fraction: 0.7
+    bagging_freq: 1
+    reg_alpha: 0.3
+    reg_lambda: 2.0
+    extra_trees: true
+    path_smooth: 2.0
+    seed: 42
+    feature_fraction_seed: 42
+    bagging_seed: 42
+    data_random_seed: 42
+    deterministic: true
+    force_col_wise: true
+    num_threads: -1

@@ -1,0 +1,12 @@
+{
+  "created_at": "2026-05-09 20:30:00",
+  "purpose": "哨兵文件：仅供 factor_lab/README 与 factor_lab.py list 列出 base-only 基线锚点。运行 `--lab base_only` 时 run_experiment.py 走代码分支（model_meta.combined_factors_json=None），不会真正读取本文件的 factors。",
+  "n_factors": 0,
+  "expected_total_features": "20 base + 0 combined = 20 维（纯 base 基线）",
+  "rationale": [
+    "base-only 是评估任何'base + 新因子'实验的天然下界：只有 base + new > base_only 才能说明新因子带来了正向信息",
+    "v18-v2 是'base + 18 强因子'已知上界（WF IR=+0.868），base_only 是'base + 0 因子'已知下界",
+    "把所有 lab 实验放在两条锚点之间审视，能避免被单切分单点 IR 误导"
+  ],
+  "factors": []
+}

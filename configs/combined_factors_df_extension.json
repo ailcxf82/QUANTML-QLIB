@@ -1,0 +1,208 @@
+{
+  "created_at": "2026-05-09 18:15:00",
+  "script": "manual_curation_after_new_md_increment",
+  "mode": "v18_v2_plus_new_md_extension",
+  "purpose": "在不影响生产基线 v18-v2 的前提下，把 combined_factors_df_expressions_new.md 中真正未启用的 7 个候选因子加入对照实验。",
+  "v18_v2_baseline_archive": "configs/_archive/combined_factors_df_v18_v2_2026-05-07.json",
+  "production_config_unchanged": "configs/combined_factors_df.json",
+  "production_run_id": "lgbm_daily_prod_314ec0c8",
+  "production_wf_run_id": "lgbm_daily_0d8b0755",
+  "production_wf_baseline": {
+    "ir": 0.868,
+    "annret": 1.308,
+    "mdd": -0.085,
+    "fold3_ic": 0.0211
+  },
+  "start": "2020-01-01",
+  "end": "2026-04-27",
+  "instruments": "csi500",
+  "n_factors": 25,
+  "expected_total_features": "20 内置 + 25 combined = 45 维",
+  "rationale": [
+    "对比 new.md 列出的 15 个因子与 v18-v2 现有 18 个因子，发现 8 个完全重叠（log_signed_volume / close_location / rank_close_open / ValueMR_20D / earnings_yield_momentum_5d_interaction / turnover_surprise_20 / volume_ratio_ma_15d / roe_momentum_60d）",
+    "剩余 7 个为 new.md 中 v18-v2 未启用的候选，本配置全部纳入做一次完整 LGBM gain 验证",
+    "若 WF IR 不胜出 v18-v2 (+0.868)，则不会替换生产基线",
+    "本文件不会被 lgbm.yaml/predict_live.py 读取，仅供 lgbm_ext 实验模型使用"
+  ],
+  "warning": [
+    "其中 4 个因子在前面的实验里已有'反例证据':",
+    "  - roe_momentum_5d_interaction: v18 实验 gain=0.66% 已被剔除",
+    "  - close_location_ma_5: v18 实验 gain=0.94% 与 close_location 高度共线已被剔除",
+    "  - sma_dv_ratio_10d: v19 实验加入后 WF IR 从 +0.868 暴跌至 +0.385（-55.6%），已淘汰",
+    "  - intraday_range: 实测 ICIR=-0.217 与 v18-v2 已有 rank_high_low (ICIR=-0.218) 同源近义",
+    "建议先观察单切分 IR 是否退化超过 5%，若退化则放弃 WF 验证以节省 14 分钟成本"
+  ],
+  "factors": [
+    {
+      "name": "ValueMR_20D",
+      "source": "v18_v2_baseline",
+      "v18_gain_pct": 0.55,
+      "real_icir_eval": -0.0964
+    },
+    {
+      "name": "volume_zscore_20d",
+      "source": "v18_v2_baseline",
+      "v18_gain_pct": 0.51,
+      "real_icir_eval": -0.0438
+    },
+    {
+      "name": "turnover_acceleration_5d",
+      "source": "v18_v2_baseline",
+      "v18_gain_pct": 1.02,
+      "real_icir_eval": -0.1158
+    },
+    {
+      "name": "volume_ratio_ma_15d",
+      "source": "v18_v2_baseline",
+      "v18_gain_pct": 1.88,
+      "real_icir_eval": -0.2057
+    },
+    {
+      "name": "roe_momentum_60d",
+      "source": "v18_v2_baseline",
+      "v18_gain_pct": 2.46,
+      "real_icir_eval": 0.0667
+    },
+    {
+      "name": "quarterly_eps",
+      "source": "v18_v2_baseline",
+      "v18_gain_pct": 2.48,
+      "real_icir_eval": 0.1168
+    },
+    {
+      "name": "close_location_turnover_wt",
+      "source": "v18_v2_baseline",
+      "v18_gain_pct": 9.47,
+      "real_icir_eval": -0.1519
+    },
+    {
+      "name": "log_signed_volume",
+      "source": "v18_v2_baseline",
+      "v18_gain_pct": 3.53,
+      "real_icir_eval": -0.041
+    },
+    {
+      "name": "turnover_surprise_20",
+      "source": "v18_v2_baseline",
+      "v18_gain_pct": 3.39,
+      "real_icir_eval": -0.1386
+    },
+    {
+      "name": "pb_pct_change_20d",
+      "source": "v18_v2_baseline",
+      "v18_gain_pct": 3.25,
+      "real_icir_eval": -0.1018
+    },
+    {
+      "name": "close_location",
+      "source": "v18_v2_baseline",
+      "v18_gain_pct": 2.65,
+      "real_icir_eval": -0.0111
+    },
+    {
+      "name": "volume_ratio",
+      "source": "v18_v2_baseline",
+      "v18_gain_pct": 1.19,
+      "real_icir_eval": -0.0761
+    },
+    {
+      "name": "rank_close_open",
+      "source": "v18_v2_baseline",
+      "v18_gain_pct": 1.17,
+      "real_icir_eval": -0.0101
+    },
+    {
+      "name": "earnings_yield_momentum_5d_interaction",
+      "source": "v18_v2_baseline",
+      "v18_gain_pct": 1.03,
+      "real_icir_eval": -0.0581
+    },
+    {
+      "name": "earnings_growth_smooth",
+      "source": "v18_v2_top_gain",
+      "real_icir_eval": 0.2788,
+      "dim_added": "fundamental_growth_smoothed"
+    },
+    {
+      "name": "rank_high_low",
+      "source": "v18_v2_top_gain",
+      "real_icir_eval": -0.2181,
+      "dim_added": "intraday_amplitude_reversal"
+    },
+    {
+      "name": "liq_turnover_f",
+      "source": "v18_v2_top_gain",
+      "real_icir_eval": -0.2000,
+      "dim_added": "turnover_level_absolute"
+    },
+    {
+      "name": "roe_pb_ratio",
+      "source": "v18_v2_top_gain",
+      "real_icir_eval": 0.1772,
+      "dim_added": "quality_value_composite"
+    },
+    {
+      "name": "winsorized_zscore_volume_ratio",
+      "source": "new_md_2026-05-09",
+      "md_ic": 0.099009,
+      "md_ic_ir": 5.7512,
+      "real_icir_eval": -0.0761,
+      "qlib_expr": "$volume_ratio",
+      "synonym_warning": "Qlib 不支持截面 winsorize，已降级为 $volume_ratio 原值；CSZScoreNorm 后与 v18-v2 中 volume_ratio 完全等价（实测 ICIR 同为 -0.0761）。建议跑前用 LGBM gain 检测是否被冗余处理"
+    },
+    {
+      "name": "roe_momentum_5d_interaction",
+      "source": "new_md_2026-05-09",
+      "md_ic": 0.127643,
+      "md_ic_ir": 5.6139,
+      "real_icir_eval": -0.0797,
+      "qlib_expr": "$roe*($close_qfq/(Ref($close_qfq,5)+1e-12)-1)",
+      "rejected_history": "v18 实验 gain=0.66% 已被剔除（截面 rank 降级版本，效果差）"
+    },
+    {
+      "name": "close_location_ma_5",
+      "source": "new_md_2026-05-09",
+      "md_ic": 0.134094,
+      "md_ic_ir": 4.7995,
+      "real_icir_eval": -0.0364,
+      "qlib_expr": "Mean(($close_qfq-$low_qfq)/($high_qfq-$low_qfq+1e-12),5)",
+      "rejected_history": "v18 实验 gain=0.94% 已被剔除（与 close_location 高度共线）"
+    },
+    {
+      "name": "sma_volume_ratio_5d",
+      "source": "new_md_2026-05-09",
+      "md_ic": 0.046597,
+      "md_ic_ir": 3.4185,
+      "real_icir_eval": -0.1250,
+      "qlib_expr": "Mean($volume_ratio,5)",
+      "synonym_warning": "与 v18-v2 中 volume_ratio_ma_15d (ICIR=-0.2057) 同 family 仅周期不同，可能高度共线"
+    },
+    {
+      "name": "sma_volume_ratio_10d",
+      "source": "new_md_2026-05-09",
+      "md_ic": 0.048960,
+      "md_ic_ir": 2.1169,
+      "real_icir_eval": -0.1772,
+      "qlib_expr": "Mean($volume_ratio,10)",
+      "synonym_warning": "与 v18-v2 中 volume_ratio_ma_15d (ICIR=-0.2057) 同 family 仅周期不同，可能高度共线"
+    },
+    {
+      "name": "sma_dv_ratio_10d",
+      "source": "new_md_2026-05-09",
+      "md_ic": 0.020286,
+      "md_ic_ir": 0.9065,
+      "real_icir_eval": 0.0809,
+      "qlib_expr": "Mean($dv_ratio,10)",
+      "rejected_history": "v19 实验加入后 WF IR 从 +0.868 暴跌到 +0.385（-55.6%），AnnRet 减半，因股息率因子诱导风格漂移到价值 β 主导。已淘汰，不建议复用"
+    },
+    {
+      "name": "intraday_range",
+      "source": "new_md_2026-05-09",
+      "md_ic": 0.032902,
+      "md_ic_ir": 0.8424,
+      "real_icir_eval": -0.2168,
+      "qlib_expr": "($high_qfq-$low_qfq)/($close_qfq+1e-12)",
+      "synonym_warning": "与 v18-v2 中 rank_high_low (ICIR=-0.2181, 用 $high_qfq/$low_qfq) 同源近义，分母不同。可能边际信息有限"
+    }
+  ]
+}
