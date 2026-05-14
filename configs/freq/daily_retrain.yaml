@@ -1,0 +1,49 @@
+# 日频"冻结快照"训练配置
+# ================================================================
+# 与 configs/freq/daily.yaml 的关系：
+#   - 切分(dataset_segments)、执行器(executor)、回测参数(backtest) 完全沿用 daily.yaml
+#   - 唯一覆盖：qlib_init.provider_uri 指向 D:/qlib_data/qlib_data_train_<YYYYMM>/
+#
+# 目的（防止 sharpe 抖动的核心治理手段）：
+#   - 每日 qlib dump 会回填历史复权 / 基本面 / 新成分股，
+#     在 LIVE 路径(D:/qlib_data/qlib_data/)上直接训练会出现"同 commit 不同 sharpe"
+#     的不可复现问题（已在 2026-05-11~12 实测见过 sharpe 从 +3.35 → +0.66 漂移）。
+#   - 月度从 LIVE 路径冻结一份 qlib_data_train_<YYYYMM>/，
+#     训练全部走冻结快照，复现性 100%。
+#
+# 用法：
+#   1) 月初冻结：robocopy D:\qlib_data\qlib_data D:\qlib_data\qlib_data_train_<YYYYMM> /MIR
+#   2) 训练:    python python/run_experiment.py --model lgbm --freq daily_retrain
+#   3) 复现验证: 同一命令再跑一次，sharpe / ic_mean 必须完全一致
+
+# 切分与 daily.yaml 完全一致（继承 v18-v2 训练口径）
+dataset_segments:
+  train: ["2020-01-01", "2023-12-31"]
+  valid: ["2024-01-01", "2024-12-31"]
+  test:  ["2025-01-01", "2026-05-12"]
+
+freq_meta:
+  name: "daily_retrain"
+  freq_key: "1day"
+
+# ⭐️ 关键覆盖：指向冻结快照（每月手动同步）
+qlib_init:
+  provider_uri: "D:/qlib_data/qlib_data_train_20260513"
+  region: cn
+
+executor:
+  class: "SimulatorExecutor"
+  module_path: "qlib.backtest.executor"
+  kwargs:
+    time_per_step: "day"
+    generate_portfolio_metrics: true
+
+backtest:
+  exchange_kwargs:
+    freq: "day"
+    limit_threshold: 0.095
+    deal_price: "close"
+    open_cost: 0.0025
+    close_cost: 0.0035
+    min_cost: 5
+    impact_cost: 0

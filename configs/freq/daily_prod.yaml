@@ -16,18 +16,18 @@ freq_meta:
 #   3) experiment.end_time 建议与 test 对齐，便于 universe 过滤等逻辑与日历一致（旧版仅用其作回测 end 已废弃）
 
 experiment:
-  end_time: "2026-05-08"
+  end_time: "2026-05-12"
 
 dataset:
   kwargs:
     handler:
       kwargs:
-        end_time: "2026-05-08"
+        end_time: "2026-05-12"
 
 dataset_segments:
   train: ["2020-01-01", "2025-12-31"]
   valid: ["2026-01-01", "2026-02-28"]
-  test:  ["2026-03-01", "2026-05-08"]
+  test:  ["2026-03-01", "2026-05-12"]
 
 executor:
   class: "SimulatorExecutor"

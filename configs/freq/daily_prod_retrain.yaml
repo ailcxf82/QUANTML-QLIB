@@ -1,0 +1,51 @@
+# 日频生产"冻结快照"训练配置（上线前 sanity 检查）
+# ================================================================
+# 与 configs/freq/daily_prod.yaml 的关系：
+#   - 切分(2020~2025 train / 2026Q1 valid / 2026-03~05 test) 完全沿用 daily_prod.yaml
+#   - 唯一覆盖：qlib_init.provider_uri 指向 D:/qlib_data/qlib_data_train_<YYYYMM>/
+#
+# 目的：
+#   daily_prod 的 test 段只有 ~46 个交易日，对训练样本任何微小变化极其敏感
+#   （已实测：同 commit 同 segments 下 sharpe 在 -2 ~ +3 之间剧烈抖动）。
+#   通过指向冻结快照，复现性提升到 100%。
+
+freq_meta:
+  name: "daily_prod_retrain"
+  freq_key: "1day"
+
+# 复用 daily_prod 的 end_time 注入逻辑
+experiment:
+  end_time: "2026-05-12"
+
+dataset:
+  kwargs:
+    handler:
+      kwargs:
+        end_time: "2026-05-12"
+
+dataset_segments:
+  train: ["2020-01-01", "2025-12-31"]
+  valid: ["2026-01-01", "2026-02-28"]
+  test:  ["2026-03-01", "2026-05-12"]
+
+# ⭐️ 关键覆盖：指向冻结快照
+qlib_init:
+  provider_uri: "D:/qlib_data/qlib_data_train_20260513"
+  region: cn
+
+executor:
+  class: "SimulatorExecutor"
+  module_path: "qlib.backtest.executor"
+  kwargs:
+    time_per_step: "day"
+    generate_portfolio_metrics: true
+
+backtest:
+  exchange_kwargs:
+    freq: "day"
+    limit_threshold: 0.095
+    deal_price: "close"
+    open_cost: 0.0025
+    close_cost: 0.0035
+    min_cost: 5
+    impact_cost: 0

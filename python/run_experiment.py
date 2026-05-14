@@ -130,6 +130,11 @@ _FREQ_ALIASES: Dict[str, str] = {
     "d": "daily",
     "daily_prod": "daily_prod",
     "prod": "daily_prod",
+    # 冻结快照训练专用：与 daily / daily_prod 完全相同的切分与超参，
+    # 仅覆盖 qlib_init.provider_uri 指向 D:/qlib_data/qlib_data_train_<YYYYMM>/。
+    # 目的：避免每日 qlib dump 回填历史数据导致训练样本漂移、sharpe 抖动。
+    "daily_retrain": "daily_retrain",
+    "daily_prod_retrain": "daily_prod_retrain",
     "minute": "minute",
     "min": "minute",
     "1min": "minute",

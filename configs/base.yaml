@@ -13,7 +13,7 @@ experiment:
   market: "all"
   benchmark: "000905.SZ"
   start_time: "2020-01-01"
-  end_time: "2026-04-28"
+  end_time: "2026-05-12"
   seed: 42
   account: 300000
   # 回测可投资股票池：只在 csi500 中选股，避免选到 ST/小盘/退市风险股

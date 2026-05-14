@@ -273,13 +273,65 @@ def generate_pred_score(
     return pred
 
 
+def _find_latest_universe_anchor(
+    universe: str,
+    provider_uri: str,
+    target_date: str,
+    look_back_days: int = 120,
+) -> Optional[str]:
+    """解析 instruments/<universe>.txt，找 target_date 之前最近的成分股调整日。
+
+    适用业务规则：成分股按月调整，月内沿用上次调整日的快照。
+    例如 csi500 在 2026-04-30 调整后，5 月所有交易日都该用 4-30 的成分股表。
+
+    Args:
+        universe: qlib universe 名（如 "csi500"、"csi300"）
+        provider_uri: qlib 数据根目录
+        target_date: 目标日期 "YYYY-MM-DD"
+        look_back_days: 最大回退天数，超过则放弃（避免拿到过期成分股表）
+
+    Returns:
+        anchor_date "YYYY-MM-DD"；若 instruments 文件不存在 / 全部超出 look_back / 无有效记录则 None
+    """
+    universe_path = Path(provider_uri) / "instruments" / f"{universe}.txt"
+    if not universe_path.exists():
+        return None
+
+    target_ts = pd.Timestamp(target_date)
+    max_end: Optional[pd.Timestamp] = None
+    for ln in universe_path.read_text(encoding="utf-8", errors="ignore").splitlines():
+        parts = ln.strip().split()
+        if len(parts) < 3:
+            continue
+        try:
+            end_ts = pd.Timestamp(parts[2][:10])
+        except Exception:
+            continue
+        # 不能用未来日期（避免穿越）
+        if end_ts > target_ts:
+            continue
+        if max_end is None or end_ts > max_end:
+            max_end = end_ts
+
+    if max_end is None:
+        return None
+    if (target_ts - max_end).days > look_back_days:
+        return None
+    return max_end.strftime("%Y-%m-%d")
+
+
 def filter_to_universe(
     pred_score: pd.Series,
     universe: str,
     predict_date: str,
     run_id: str = "live",
+    provider_uri: Optional[str] = None,
 ) -> pd.Series:
-    """将预测打分限定到可投资 universe（csi500）。"""
+    """将预测打分限定到可投资 universe（csi500）。
+
+    成分股按月更新的规则下，当 predict_date 当日 universe 为空（qlib dump
+    尚未更新到本月调整日），自动回退到最近一次调整日的快照（120 天内）。
+    """
     if not universe or universe.lower() == "all":
         return pred_score
     try:
@@ -291,13 +343,36 @@ def filter_to_universe(
         tradable = D.list_instruments(
             inst_cfg, start_time=predict_date, end_time=predict_date, as_list=True
         )
+        anchor_used = predict_date
+
+        # 当日为空：按"成分股按月调整"规则回退到最近调整日
         if not tradable:
-            print(f"  警告: {universe} 在 {predict_date} 为空，跳过过滤")
+            uri_for_lookup = provider_uri or "D:/qlib_data/qlib_data"
+            anchor_used = _find_latest_universe_anchor(
+                universe=universe,
+                provider_uri=uri_for_lookup,
+                target_date=predict_date,
+                look_back_days=120,
+            )
+            if anchor_used:
+                tradable = D.list_instruments(
+                    inst_cfg, start_time=anchor_used, end_time=anchor_used, as_list=True
+                )
+                print(
+                    f"  注意: {universe} 在 {predict_date} 当日为空，"
+                    f"按月调整规则回退到最近调整日 {anchor_used}"
+                )
+
+        if not tradable:
+            print(f"  警告: {universe} 在 {predict_date} 及最近 120 天内均为空，跳过过滤")
             return pred_score
+
         tradable_set = set(tradable)
         mask = pred_score.index.get_level_values(1).isin(tradable_set)
         filtered = pred_score[mask]
-        print(f"  universe 过滤: {universe} 保留 {mask.sum()} / {len(pred_score)} 条")
+        print(
+            f"  universe 过滤: {universe}@{anchor_used} 保留 {mask.sum()} / {len(pred_score)} 条"
+        )
         return filtered
     except Exception as exc:
         print(f"  警告: universe 过滤失败（{exc}），使用全量预测")
@@ -1134,7 +1209,8 @@ def main() -> None:
 
     # ── universe 过滤 ──────────────────────────────────────────────
     pred_score = filter_to_universe(
-        pred_score, tradable_universe, predict_date, run_id
+        pred_score, tradable_universe, predict_date, run_id,
+        provider_uri=provider_uri,
     )
 
     # ── 构建过滤器 + 选股 ─────────────────────────────────────────
