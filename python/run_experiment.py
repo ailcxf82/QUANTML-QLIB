@@ -135,6 +135,10 @@ _FREQ_ALIASES: Dict[str, str] = {
     # 目的：避免每日 qlib dump 回填历史数据导致训练样本漂移、sharpe 抖动。
     "daily_retrain": "daily_retrain",
     "daily_prod_retrain": "daily_prod_retrain",
+    # 5 日标签变体：标签改为 T+1→T+6 五日累计回报，降低 IC_std 提升 ICIR
+    "daily_5d_label": "daily_5d_label",
+    "5d": "daily_5d_label",
+    "5day": "daily_5d_label",
     "minute": "minute",
     "min": "minute",
     "1min": "minute",
@@ -576,24 +580,65 @@ def validate_pred_series(pred: pd.Series, run_id: str) -> None:
         )
 
 
+def _find_universe_anchor(
+    universe: str,
+    provider_uri: str,
+    end_time: str,
+    look_back_days: int = 120,
+) -> Optional[str]:
+    """从 instruments/<universe>.txt 中找 end_time 之前最近的成分股调整日。
+
+    与 predict_live._find_latest_universe_anchor 逻辑对称，供回测侧使用。
+    """
+    universe_path = Path(provider_uri) / "instruments" / f"{universe}.txt"
+    if not universe_path.exists():
+        return None
+
+    target_ts = pd.Timestamp(end_time)
+    max_end: Optional[pd.Timestamp] = None
+    for ln in universe_path.read_text(encoding="utf-8", errors="ignore").splitlines():
+        parts = ln.strip().split()
+        if len(parts) < 3:
+            continue
+        try:
+            end_ts = pd.Timestamp(parts[2][:10])
+        except Exception:
+            continue
+        if end_ts > target_ts:
+            continue
+        if max_end is None or end_ts > max_end:
+            max_end = end_ts
+
+    if max_end is None:
+        return None
+    if (target_ts - max_end).days > look_back_days:
+        return None
+    return max_end.strftime("%Y-%m-%d")
+
+
 def filter_pred_to_universe(
     pred: pd.Series,
     universe: Optional[str],
     start_time: str,
     end_time: str,
     run_id: str,
+    provider_uri: Optional[str] = None,
 ) -> pd.Series:
     """将 pred_score 限定到指定可投资 universe（如 csi500）。
 
     若 universe 为空或为 "all"，原样返回；否则只保留 universe 中的股票，
     用于"训练全市场、回测仅限可投资股票池"的解耦设计。
 
+    当 [start_time, end_time] 区间内 universe 为空时（常见于冻结训练快照数据），
+    自动回退到最近调整日的快照（120 天内），与 predict_live 行为保持一致。
+
     Args:
-        pred:        模型预测打分，MultiIndex(datetime, instrument)
-        universe:    qlib 可识别的 universe 名称（如 csi500、csi300）
-        start_time:  过滤起始日期（建议传测试集起始）
-        end_time:    过滤结束日期
-        run_id:      日志标识
+        pred:         模型预测打分，MultiIndex(datetime, instrument)
+        universe:     qlib 可识别的 universe 名称（如 csi500、csi300）
+        start_time:   过滤起始日期（建议传测试集起始）
+        end_time:     过滤结束日期
+        run_id:       日志标识
+        provider_uri: Qlib 数据目录路径，用于锚点回退时扫描 instruments txt
 
     Returns:
         过滤后的 pred 序列
@@ -607,9 +652,32 @@ def filter_pred_to_universe(
     tradable = D.list_instruments(
         inst_cfg, start_time=start_time, end_time=end_time, as_list=True
     )
+
+    anchor_used = end_time
+    if not tradable and provider_uri:
+        # 冻结快照场景：尝试找 end_time 前最近的成分股调整日
+        anchor = _find_universe_anchor(
+            universe=universe,
+            provider_uri=provider_uri,
+            end_time=end_time,
+            look_back_days=120,
+        )
+        if anchor:
+            tradable = D.list_instruments(
+                inst_cfg, start_time=anchor, end_time=anchor, as_list=True
+            )
+            if tradable:
+                anchor_used = anchor
+                LOGGER.warning(
+                    "tradable_universe '%s' 在 [%s, %s] 区间为空，"
+                    "已回退到最近调整日快照 %s（与 predict_live 行为对齐）",
+                    universe, start_time, end_time, anchor,
+                    extra={"run_id": run_id, "instrument": "ALL", "datetime": "", "signal": 0.0, "version": VERSION},
+                )
+
     if not tradable:
         LOGGER.warning(
-            "tradable_universe '%s' 在 [%s, %s] 区间为空，跳过过滤",
+            "tradable_universe '%s' 在 [%s, %s] 区间及最近 120 天内均为空，跳过过滤",
             universe, start_time, end_time,
             extra={"run_id": run_id, "instrument": "ALL", "datetime": "", "signal": 0.0, "version": VERSION},
         )
@@ -621,8 +689,9 @@ def filter_pred_to_universe(
     filtered = pred[mask]
 
     LOGGER.info(
-        "tradable_universe filter: %s, 保留 %d / %d 条记录（%.1f%%）",
+        "tradable_universe filter: %s@%s, 保留 %d / %d 条记录（%.1f%%）",
         universe,
+        anchor_used,
         int(mask.sum()),
         len(pred),
         100.0 * float(mask.mean()),
@@ -732,6 +801,13 @@ def persist_artifacts(
             combined_json_for_meta = cfg.get("model_meta", {}).get("combined_factors_json")
             if combined_json_for_meta:
                 model_meta["combined_factors_json"] = combined_json_for_meta
+            # 透传标签周期（--label-horizon 覆盖时写入，供 predict_live 推理时读取）
+            label_horizon_for_meta = cfg.get("model_meta", {}).get("label_horizon")
+            if label_horizon_for_meta is not None:
+                model_meta["label_horizon"] = label_horizon_for_meta
+            label_expr_for_meta = cfg.get("model_meta", {}).get("label_expr")
+            if label_expr_for_meta:
+                model_meta["label_expr"] = label_expr_for_meta
             # 把 metrics 也写入 latest meta，供 factor_lab.py compare 一站式拉指标
             # （metrics.json 在 run 目录里，但 latest meta 直接放摘要可避免对比脚本扫多个目录）
             if metrics:
@@ -1008,6 +1084,7 @@ def run_walk_forward(
                 start_time=fold.test_start,
                 end_time=fold.test_end,
                 run_id=run_ctx.run_id,
+                provider_uri=cfg.get("qlib_init", {}).get("provider_uri"),
             )
 
         validate_pred_series(pred, run_ctx.run_id)
@@ -1186,6 +1263,19 @@ def main() -> None:
             "特殊值 base_only：跳过 combined_json 加载，纯 20 维 base 因子（基线）。"
         ),
     )
+    parser.add_argument(
+        "--label-horizon",
+        type=int,
+        default=None,
+        metavar="N",
+        help=(
+            "标签预测周期（交易日数）。覆盖配置文件中的 label 表达式，动态生成 "
+            "Ref($close_qfq,-(N+1))/Ref($close_qfq,-1)-1（T+1→T+N+1 的 N 日累计回报）。"
+            "示例：--label-horizon 5 → 5 日标签，IC_std 约下降 30~50%%，ICIR 期望提升。"
+            "未指定时使用配置文件中的默认 label（当前为 1 日）。"
+            "注意：Walk-Forward 的 purge_days 会自动从新 label 表达式推导，无需手动调整。"
+        ),
+    )
 
     # ── Walk-Forward 参数（rolling 模式） ───────────────────────────
     parser.add_argument(
@@ -1269,6 +1359,42 @@ def main() -> None:
                     f" 请先在 configs/factor_lab/ 创建 {lab_name}.json。"
                 )
             cfg["model_meta"]["combined_factors_json"] = lab_json_path
+
+    # ── 标签周期覆盖（--label-horizon N）────────────────────────────
+    # 允许不修改配置文件、直接从 CLI 调整标签预测周期。
+    # 生成规则：N 日标签 = Ref($close_qfq,-(N+1))/Ref($close_qfq,-1)-1
+    #   - Ref($close_qfq,-1)   = T+1 收盘价（执行价，信号→T+1 close 成交）
+    #   - Ref($close_qfq,-(N+1)) = T+N+1 收盘价（持有 N 日后的平仓价）
+    # purge_days 由 infer_purge_days 自动推导，WF 中无需手动指定。
+    if args.label_horizon is not None:
+        horizon = int(args.label_horizon)
+        if horizon < 1:
+            raise ValueError(f"--label-horizon 必须 >= 1，当前传入 {horizon}")
+        new_label_expr = (
+            f"Ref($close_qfq,-{horizon + 1})/Ref($close_qfq,-1)-1"
+        )
+        # 注入路径：dataset → handler → data_loader → config → label
+        try:
+            dl_config = (
+                cfg["dataset"]["kwargs"]["handler"]["kwargs"]
+                ["data_loader"]["kwargs"]["config"]
+            )
+            dl_config["label"] = [[new_label_expr], ["LABEL0"]]
+            LOGGER.info(
+                "label_horizon_override: horizon=%d, expr=%s",
+                horizon, new_label_expr,
+                extra={"run_id": "init", "instrument": "ALL",
+                       "datetime": "", "signal": 0.0, "version": VERSION},
+            )
+        except KeyError as e:
+            raise RuntimeError(
+                f"--label-horizon 注入失败：配置路径 dataset.handler.data_loader.config "
+                f"不存在（缺少键 {e}）。请确认使用组合式配置而非完整 --config 文件。"
+            ) from e
+
+        # 同步记录到 model_meta，供 persist_artifacts 和后续审计追溯
+        cfg.setdefault("model_meta", {})["label_horizon"] = horizon
+        cfg["model_meta"]["label_expr"] = new_label_expr
 
     cfg = inject_feature_config(cfg)
 
@@ -1385,6 +1511,7 @@ def main() -> None:
                 start_time=test_seg[0],
                 end_time=test_seg[1],
                 run_id=run_ctx.run_id,
+                provider_uri=cfg.get("qlib_init", {}).get("provider_uri"),
             )
             validate_pred_series(pred_score, run_ctx.run_id)
 

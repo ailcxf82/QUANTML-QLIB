@@ -26,6 +26,7 @@ from __future__ import annotations
 import argparse
 import copy
 import json
+import logging
 import math
 import sys
 import time
@@ -47,6 +48,46 @@ PREDICTIONS_BASE = WORKSPACE_ROOT / "predictions"
 LIVE_CFG_PATH = WORKSPACE_ROOT / "configs" / "live" / "daily_live.yaml"
 VERSION = "v1"
 
+# ─────────────────────────────────────────────────────────────────────────────
+# 结构化日志（run_id / instrument / datetime / signal / version 字段）
+# ─────────────────────────────────────────────────────────────────────────────
+
+class _StructuredAdapter(logging.LoggerAdapter):
+    """为每条日志自动注入结构化 extra 字段的适配器。"""
+
+    def __init__(self, logger: logging.Logger, run_id: str = "", instrument: str = "ALL") -> None:
+        super().__init__(logger, {})
+        self._run_id = run_id
+        self._instrument = instrument
+
+    def process(self, msg: str, kwargs: Dict) -> tuple:
+        extra = kwargs.setdefault("extra", {})
+        extra.setdefault("run_id", self._run_id)
+        extra.setdefault("instrument", self._instrument)
+        extra.setdefault("datetime", "")
+        extra.setdefault("signal", 0.0)
+        extra.setdefault("version", VERSION)
+        return msg, kwargs
+
+
+def _make_logger(run_id: str = "", instrument: str = "ALL") -> _StructuredAdapter:
+    base = logging.getLogger("predict_live")
+    if not base.handlers:
+        handler = logging.StreamHandler()
+        handler.setFormatter(
+            logging.Formatter(
+                "%(asctime)s [%(levelname)s] run_id=%(run_id)s inst=%(instrument)s %(message)s",
+                datefmt="%Y-%m-%d %H:%M:%S",
+            )
+        )
+        base.addHandler(handler)
+        base.setLevel(logging.INFO)
+    return _StructuredAdapter(base, run_id=run_id, instrument=instrument)
+
+
+# 模块级 logger（run_id 在 main 启动后通过 _make_logger 覆盖）
+LOGGER = _make_logger()
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # 配置加载工具
@@ -67,15 +108,43 @@ def _deep_merge(base: Dict, override: Dict) -> Dict:
     return result
 
 
+def _inject_label_horizon(cfg: Dict[str, Any], horizon: int) -> None:
+    """将 N 日标签表达式注入到 dataset handler 的 data_loader.config.label。
+
+    Args:
+        cfg:     完整合并后的配置字典（原地修改）
+        horizon: 标签预测周期（交易日数），须 >= 1
+    """
+    label_expr = f"Ref($close_qfq,-{horizon + 1})/Ref($close_qfq,-1)-1"
+    try:
+        dl_cfg = (
+            cfg["dataset"]["kwargs"]["handler"]["kwargs"]
+            ["data_loader"]["kwargs"]["config"]
+        )
+        dl_cfg["label"] = [[label_expr], ["LABEL0"]]
+    except KeyError as e:
+        raise RuntimeError(
+            f"label_horizon 注入失败：配置路径缺少键 {e}。"
+            "请确认 base.yaml 中 dataset.handler.data_loader.config 路径完整。"
+        ) from e
+    cfg.setdefault("model_meta", {})["label_horizon"] = horizon
+    cfg["model_meta"]["label_expr"] = label_expr
+
+
 def load_live_config(
     model_name: str,
     freq_name: str,
     predict_date: str,
+    label_horizon: Optional[int] = None,
 ) -> Dict[str, Any]:
     """加载并合并实盘配置（base.yaml + models/<model>.yaml + live/daily_live.yaml）。
 
     注: 实盘不使用 freq/daily.yaml（含 dataset_segments），
     改用 live/daily_live.yaml 并由本函数动态注入 segments。
+
+    Args:
+        label_horizon: 若非 None，覆盖 base.yaml 的 label 表达式为 N 日标签
+                       （通常从 model_meta.json 中读取并传入，保持训练与推理口径一致）。
     """
     configs_dir = WORKSPACE_ROOT / "configs"
 
@@ -104,6 +173,11 @@ def load_live_config(
         "valid": [train_start, train_end],  # 实盘不用 valid，同 train 避免空段
         "test":  [predict_date, predict_date],
     }
+
+    # 标签口径：若训练时使用了 N 日标签，实盘 retrain 必须保持一致
+    # predict-only 模式下 label 不影响推理，但注入后可在 meta 中留审计记录
+    if label_horizon is not None and label_horizon > 1:
+        _inject_label_horizon(cfg, label_horizon)
 
     # 注入 model_meta（freq 信息）
     cfg.setdefault("model_meta", {})
@@ -224,6 +298,18 @@ def train_and_save_model(
     latest_path = models_dir / f"latest_{model_name}_{freq_name}.pkl"
     joblib.dump(model, latest_path)
 
+    horizon = cfg.get("model_meta", {}).get("label_horizon")
+    label_expr = cfg.get("model_meta", {}).get(
+        "label_expr",
+        cfg.get("dataset", {})
+           .get("kwargs", {})
+           .get("handler", {})
+           .get("kwargs", {})
+           .get("data_loader", {})
+           .get("kwargs", {})
+           .get("config", {})
+           .get("label", [[]])[0][0] if True else None,
+    )
     meta = {
         "run_id": run_id,
         "model": model_name,
@@ -233,6 +319,10 @@ def train_and_save_model(
         "saved_at": pd.Timestamp.now().isoformat(),
         "version": VERSION,
     }
+    if horizon is not None:
+        meta["label_horizon"] = horizon
+    if label_expr:
+        meta["label_expr"] = label_expr
     meta_path = models_dir / f"latest_{model_name}_{freq_name}_meta.json"
     with meta_path.open("w", encoding="utf-8") as f:
         json.dump(meta, f, ensure_ascii=False, indent=2)
@@ -326,11 +416,17 @@ def filter_to_universe(
     predict_date: str,
     run_id: str = "live",
     provider_uri: Optional[str] = None,
+    allow_fallback: bool = False,
 ) -> pd.Series:
     """将预测打分限定到可投资 universe（csi500）。
 
     成分股按月更新的规则下，当 predict_date 当日 universe 为空（qlib dump
     尚未更新到本月调整日），自动回退到最近一次调整日的快照（120 天内）。
+
+    Args:
+        allow_fallback: 若为 True，当 universe 查询失败时退回全量预测并打印警告；
+                        若为 False（默认），直接抛出异常，防止静默交易全市场标的。
+                        可通过 CLI --allow-universe-fallback 启用。
     """
     if not universe or universe.lower() == "all":
         return pred_score
@@ -375,8 +471,16 @@ def filter_to_universe(
         )
         return filtered
     except Exception as exc:
-        print(f"  警告: universe 过滤失败（{exc}），使用全量预测")
-        return pred_score
+        if allow_fallback:
+            print(
+                f"  警告: universe 过滤失败（{exc}），--allow-universe-fallback 已启用，"
+                f"使用全量预测。注意：此时选股范围不再限于 {universe}。"
+            )
+            return pred_score
+        raise RuntimeError(
+            f"universe 过滤失败（{exc}）。"
+            f"若确认希望退回全量预测，请加 --allow-universe-fallback 参数运行。"
+        ) from exc
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -416,6 +520,7 @@ def filter_and_refill(
     stock_filter: Optional[Any] = None,
     exclude_st: bool = True,
     exclude_limit_up: bool = True,
+    weight_method: str = "equal",
 ) -> Tuple[pd.DataFrame, List[Dict[str, Any]]]:
     """过滤 ST 和连续涨停股票，并从剩余候选池中补充替代股票。
 
@@ -424,13 +529,14 @@ def filter_and_refill(
       - 连续涨停：封单状态大概率无法在 T+1 买入，泡沫回撤风险高
 
     Args:
-        selection:     select_topk 的初步结果（不含 drop_out 行）
-        pred_score:    universe 内全量打分（MultiIndex: datetime/instrument）
-        predict_date:  预测日期
-        topk:          目标持仓数量
-        stock_filter:  StockFilter 实例（None 则跳过过滤）
-        exclude_st:    是否过滤 ST 股票
+        selection:      select_topk 的初步结果（不含 drop_out 行）
+        pred_score:     universe 内全量打分（MultiIndex: datetime/instrument）
+        predict_date:   预测日期
+        topk:           目标持仓数量
+        stock_filter:   StockFilter 实例（None 则跳过过滤）
+        exclude_st:     是否过滤 ST 股票
         exclude_limit_up: 是否过滤连续涨停股票
+        weight_method:  建议权重计算方式（"equal"=等权 | "score"=按打分比例）
 
     Returns:
         (updated_selection, exclusion_log)
@@ -509,6 +615,7 @@ def filter_and_refill(
 
     if need_fill > 0:
         print(f"  [过滤] 需补充 {need_fill} 支替代股票...")
+        new_rows: List[Dict] = []
         for inst, score in scores_today.items():
             if filled_count >= need_fill:
                 break
@@ -533,19 +640,39 @@ def filter_and_refill(
                 exclusion_log[log_idx]["replacement"] = inst_str
                 log_idx += 1
 
-            result_df = pd.concat([result_df, pd.DataFrame([new_row])], ignore_index=True)
+            new_rows.append(new_row)
             already_selected.add(inst_str)
             filled_count += 1
             print(f"  [过滤] 补充替代股 {inst_str}（新排名 {new_rank}，打分={score:.4f}）")
 
+        if new_rows:
+            result_df = pd.concat(
+                [result_df, pd.DataFrame(new_rows)], ignore_index=True
+            )
+
         if filled_count < need_fill:
             print(f"  [过滤] 警告：仅补充 {filled_count} 支，不足 {need_fill} 支")
 
-    # ── 重新排名 & 权重 ───────────────────────────────────────────
+    # ── 重新排名 & 权重（截断到 topk）────────────────────────────
     if not result_df.empty:
         result_df = result_df.sort_values("score", ascending=False).reset_index(drop=True)
+        # 截断：prefetch 阶段多选的余量股票在此丢弃，只保留最终 topk 支
+        if len(result_df) > topk:
+            result_df = result_df.head(topk).reset_index(drop=True)
         result_df["rank"] = range(1, len(result_df) + 1)
-        result_df["suggested_weight"] = round(1.0 / max(len(result_df), 1), 4)
+
+        n = max(len(result_df), 1)
+        if weight_method == "score":
+            score_sum = result_df["score"].sum()
+            if score_sum > 0:
+                result_df["suggested_weight"] = (
+                    result_df["score"] / score_sum
+                ).round(4)
+            else:
+                result_df["suggested_weight"] = round(1.0 / n, 4)
+        else:
+            # 默认：等权
+            result_df["suggested_weight"] = round(1.0 / n, 4)
 
     return result_df, exclusion_log
 
@@ -653,10 +780,13 @@ def add_change_field(
     pred_score_today: pd.Series,
     drop_signal_quantile: float = 0.3,
 ) -> pd.DataFrame:
-    """追加 change（new_in/hold/drop_out）和 prev_score 字段。
+    """追加 change（new_in/hold/reduce/drop_out）和 prev_score 字段。
 
-    drop_out 逻辑：前日持仓股票，若今日打分低于 csi500 截面 drop_signal_quantile 分位，
-    标记为 drop_out（建议减仓/清仓）。
+    处理逻辑（针对前日持仓但今日不在 topK 的股票）：
+    - 今日打分 < drop_signal_quantile 分位 → drop_out（建议清仓，信号明显恶化）
+    - 今日打分 >= drop_signal_quantile 分位 → reduce（建议调仓，排名挤出 topK）
+
+    注意：比较基准为 prev_selection 中 change != "drop_out" 的持仓股票（即实际应持有的股票）。
     """
     selection = selection.copy()
     today_codes = set(selection["instrument"].tolist())
@@ -666,9 +796,12 @@ def add_change_field(
         selection["prev_score"] = float("nan")
         return selection
 
-    prev_codes = set(prev_selection["instrument"].tolist())
+    # 只取前日实际持仓（排除 drop_out 和 reduce 行）
+    prev_held = prev_selection[~prev_selection["change"].isin(["drop_out", "reduce"])] \
+        if "change" in prev_selection.columns else prev_selection
+    prev_codes = set(prev_held["instrument"].tolist())
     prev_score_map: Dict[str, float] = dict(
-        zip(prev_selection["instrument"], prev_selection.get("score", pd.Series(dtype=float)))
+        zip(prev_held["instrument"], prev_held.get("score", pd.Series(dtype=float)))
     )
 
     selection["change"] = selection["instrument"].apply(
@@ -678,7 +811,7 @@ def add_change_field(
         lambda c: prev_score_map.get(c, float("nan"))
     )
 
-    # 计算今日全截面分位，识别 drop_out（前日持仓但今日不在 topK）
+    # 计算今日全截面分位，识别前日持仓中被挤出 topK 的股票
     if isinstance(pred_score_today.index, pd.MultiIndex):
         today_flat = pred_score_today.copy()
         today_flat.index = today_flat.index.get_level_values("instrument")
@@ -687,33 +820,52 @@ def add_change_field(
 
     if len(today_flat) > 0:
         q_threshold = today_flat.quantile(drop_signal_quantile)
-        drop_out_candidates = [
-            c for c in prev_codes
-            if c not in today_codes and today_flat.get(c, float("nan")) < q_threshold
-        ]
+        drop_out_candidates: List[str] = []
+        reduce_candidates: List[str] = []
+        for c in prev_codes:
+            if c in today_codes:
+                continue
+            score_now = today_flat.get(c, float("nan"))
+            if math.isnan(float(score_now)) or float(score_now) < q_threshold:
+                drop_out_candidates.append(c)
+            else:
+                reduce_candidates.append(c)
     else:
         drop_out_candidates = list(prev_codes - today_codes)
+        reduce_candidates = []
 
-    # 拼接 drop_out 行
+    predict_date_val = selection["predict_date"].iloc[0] if len(selection) > 0 else ""
+
+    def _build_exit_row(code: str, change_type: str) -> Dict[str, Any]:
+        score_now = float(today_flat.get(code, float("nan"))) if len(today_flat) > 0 else float("nan")
+        score_prev = float(prev_score_map.get(code, float("nan")))
+        pct = 0.0
+        if len(today_flat) > 0 and not math.isnan(score_now):
+            pct = round(float((today_flat < score_now).mean()) * 100, 1)
+        return {
+            "instrument": code,
+            "score": score_now,
+            "rank": 999,
+            "suggested_weight": 0.0,
+            "percentile": pct,
+            "predict_date": predict_date_val,
+            "change": change_type,
+            "prev_score": score_prev,
+        }
+
+    # 拼接 drop_out 行（信号明显恶化，建议清仓）
     if drop_out_candidates:
-        drop_rows = []
-        for code in drop_out_candidates:
-            score_now = float(today_flat.get(code, float("nan")))
-            score_prev = float(prev_score_map.get(code, float("nan")))
-            pct = 0.0
-            if len(today_flat) > 0 and not math.isnan(score_now):
-                pct = round(float((today_flat < score_now).mean()) * 100, 1)
-            drop_rows.append({
-                "instrument": code,
-                "score": score_now,
-                "rank": 999,
-                "suggested_weight": 0.0,
-                "percentile": pct,
-                "predict_date": selection["predict_date"].iloc[0] if len(selection) > 0 else "",
-                "change": "drop_out",
-                "prev_score": score_prev,
-            })
-        selection = pd.concat([selection, pd.DataFrame(drop_rows)], ignore_index=True)
+        selection = pd.concat(
+            [selection, pd.DataFrame([_build_exit_row(c, "drop_out") for c in drop_out_candidates])],
+            ignore_index=True,
+        )
+
+    # 拼接 reduce 行（排名调出 topK，信号未显著恶化，建议调仓/关注）
+    if reduce_candidates:
+        selection = pd.concat(
+            [selection, pd.DataFrame([_build_exit_row(c, "reduce") for c in reduce_candidates])],
+            ignore_index=True,
+        )
 
     return selection
 
@@ -721,18 +873,8 @@ def add_change_field(
 def add_stock_names(selection: pd.DataFrame) -> pd.DataFrame:
     """尝试从 Qlib 查询股票名称，失败则用空字符串填充。"""
     selection = selection.copy()
-    selection["name"] = ""
-    try:
-        import qlib
-        from qlib.data import D
-        for idx, row in selection.iterrows():
-            try:
-                # Qlib 不直接提供中文名，此处留位置供扩展
-                selection.at[idx, "name"] = row["instrument"]
-            except Exception:
-                pass
-    except Exception:
-        pass
+    # Qlib 不直接提供中文名，此处用 instrument 占位，供后续扩展替换为真实名称
+    selection["name"] = selection["instrument"]
     return selection
 
 
@@ -796,8 +938,10 @@ def _build_report_html(
 ) -> str:
     """生成完整 HTML 预测报告。"""
 
-    topk_df = selection[selection["change"] != "drop_out"].copy()
+    exit_changes = {"drop_out", "reduce"}
+    topk_df = selection[~selection["change"].isin(exit_changes)].copy()
     drop_df = selection[selection["change"] == "drop_out"].copy()
+    reduce_df = selection[selection["change"] == "reduce"].copy()
     history_html = _build_history_table(predict_date, live_cfg)
     exclusion_log = exclusion_log or []
 
@@ -805,7 +949,9 @@ def _build_report_html(
         if c == "new_in":
             return '<span style="background:#2ecc71;color:#fff;padding:2px 8px;border-radius:4px;font-size:11px">新入</span>'
         if c == "drop_out":
-            return '<span style="background:#e74c3c;color:#fff;padding:2px 8px;border-radius:4px;font-size:11px">退出</span>'
+            return '<span style="background:#e74c3c;color:#fff;padding:2px 8px;border-radius:4px;font-size:11px">清仓</span>'
+        if c == "reduce":
+            return '<span style="background:#e67e22;color:#fff;padding:2px 8px;border-radius:4px;font-size:11px">调仓</span>'
         return '<span style="background:#3498db;color:#fff;padding:2px 8px;border-radius:4px;font-size:11px">持续</span>'
 
     def _score_bar(score: float, max_score: float) -> str:
@@ -840,7 +986,49 @@ def _build_report_html(
           <td style="text-align:center">{trend if trend else '—'}</td>
         </tr>"""
 
-    # 退出提示表
+    # 操作清单摘要
+    buy_list = topk_df[topk_df["change"] == "new_in"]["instrument"].tolist()
+    hold_list = topk_df[topk_df["change"] == "hold"]["instrument"].tolist()
+    reduce_list = reduce_df["instrument"].tolist()
+    sell_list = drop_df["instrument"].tolist()
+
+    def _code_tags(codes: List[str], color: str) -> str:
+        if not codes:
+            return '<span style="color:#aaa">—</span>'
+        return " ".join(
+            f'<span style="background:{color};color:#fff;padding:2px 8px;border-radius:4px;'
+            f'font-size:12px;margin:2px">{c}</span>'
+            for c in codes
+        )
+
+    action_summary_html = f"""
+    <div class="section" style="border-left:4px solid #D94040">
+      <h2>今日操作清单（T+1 执行参考）</h2>
+      <table>
+        <tr>
+          <td style="width:80px;font-weight:600;color:#2ecc71">买入建仓</td>
+          <td>{_code_tags(buy_list, '#2ecc71')}</td>
+        </tr>
+        <tr>
+          <td style="font-weight:600;color:#3498db">继续持有</td>
+          <td>{_code_tags(hold_list, '#3498db')}</td>
+        </tr>
+        <tr>
+          <td style="font-weight:600;color:#e67e22">考虑调仓</td>
+          <td>{_code_tags(reduce_list, '#e67e22')}
+            <small style="color:#999;margin-left:8px">（排名调出 TopK，信号未显著恶化，可逐步减仓或观望）</small>
+          </td>
+        </tr>
+        <tr>
+          <td style="font-weight:600;color:#e74c3c">建议清仓</td>
+          <td>{_code_tags(sell_list, '#e74c3c')}
+            <small style="color:#999;margin-left:8px">（今日打分跌破 {live_cfg.get('live',{}).get('drop_signal_quantile',0.3)*100:.0f} 分位，信号明显恶化）</small>
+          </td>
+        </tr>
+      </table>
+    </div>"""
+
+    # 退出提示表（清仓）
     drop_rows_html = ""
     for _, row in drop_df.iterrows():
         score_str = f"{float(row['score']):.4f}" if not math.isnan(float(row['score'])) else "—"
@@ -854,18 +1042,50 @@ def _build_report_html(
           </td>
         </tr>"""
 
+    # 调仓提示表（reduce）
+    reduce_rows_html = ""
+    for _, row in reduce_df.iterrows():
+        score_str = f"{float(row['score']):.4f}" if not math.isnan(float(row['score'])) else "—"
+        reduce_rows_html += f"""
+        <tr>
+          <td>{row['instrument']}</td>
+          <td style="text-align:center">{score_str}</td>
+          <td style="text-align:center">{row.get('percentile', 0):.1f}%</td>
+          <td style="text-align:center">
+            {f"{float(row['prev_score']):.4f}" if not math.isnan(float(row.get('prev_score', float('nan')))) else '—'}
+          </td>
+        </tr>"""
+
     drop_section = ""
-    if drop_rows_html:
-        drop_section = f"""
-    <div class="section">
-      <h2>建议减仓/退出标的</h2>
+    if drop_rows_html or reduce_rows_html:
+        reduce_part = ""
+        if reduce_rows_html:
+            reduce_part = f"""
+      <h2 style="margin-top:16px">考虑调仓标的</h2>
       <p style="color:#666;font-size:12px;margin:0 0 12px">
-        以下标的为昨日推荐但今日打分明显下滑（低于 {live_cfg.get('live',{}).get('drop_signal_quantile',0.3)*100:.0f} 分位），建议关注风险。
+        以下标的昨日持仓，今日排名调出 TopK 但信号未显著恶化（≥{live_cfg.get('live',{}).get('drop_signal_quantile',0.3)*100:.0f} 分位），可考虑逐步减仓或关注次日变化。
+      </p>
+      <table>
+        <tr><th>股票代码</th><th>今日打分</th><th>今日百分位</th><th>昨日打分</th></tr>
+        {reduce_rows_html}
+      </table>"""
+
+        drop_part = ""
+        if drop_rows_html:
+            drop_part = f"""
+      <h2 style="margin-top:16px">建议清仓标的</h2>
+      <p style="color:#666;font-size:12px;margin:0 0 12px">
+        以下标的昨日持仓，今日打分跌破 {live_cfg.get('live',{}).get('drop_signal_quantile',0.3)*100:.0f} 分位，信号明显恶化，建议清仓。
       </p>
       <table>
         <tr><th>股票代码</th><th>今日打分</th><th>今日百分位</th><th>昨日打分</th></tr>
         {drop_rows_html}
-      </table>
+      </table>"""
+
+        drop_section = f"""
+    <div class="section">
+      {reduce_part}
+      {drop_part}
     </div>"""
 
     # 过滤说明区块
@@ -874,11 +1094,12 @@ def _build_report_html(
         filter_rows_html = ""
         for entry in exclusion_log:
             replacement = entry.get("replacement") or "—"
+            reason_color = "#e67e22" if "ST" in entry["reason"] else "#e74c3c"
             filter_rows_html += f"""
         <tr>
           <td style="font-weight:600">{entry['instrument']}</td>
           <td style="text-align:center">{entry['original_rank']}</td>
-          <td style="color:{{'ST' in entry['reason'] and '#e67e22' or '#e74c3c'}}">{entry['reason']}</td>
+          <td style="color:{reason_color}">{entry['reason']}</td>
           <td style="text-align:center;font-weight:600">{replacement}</td>
         </tr>"""
         filter_section = f"""
@@ -1010,6 +1231,8 @@ def _build_report_html(
     </p>
   </div>
 
+  {action_summary_html}
+
   {filter_section}
 
   {drop_section}
@@ -1053,7 +1276,7 @@ def _build_history_table(predict_date: str, live_cfg: Dict[str, Any]) -> str:
     for d in date_dirs:
         try:
             df = pd.read_csv(d / "selection.csv", dtype={"instrument": str})
-            top = df[df["change"] != "drop_out"]
+            top = df[~df["change"].isin(["drop_out", "reduce"])]
             codes = ", ".join(top["instrument"].head(5).tolist())
             n_new = int((top["change"] == "new_in").sum())
             n_hold = int((top["change"] == "hold").sum())
@@ -1108,8 +1331,8 @@ def main() -> None:
   # 每周重训一次（周一或月初）
   python python/predict_live.py --model lgbm --freq daily --mode retrain-and-predict
 
-  # 不更新数据，仅重跑已有日期的预测
-  python python/predict_live.py --model lgbm --freq daily --mode predict-only --no-data-update
+  # universe 查询异常时允许退回全市场（谨慎使用，可能导致选股范围超出 csi500）
+  python python/predict_live.py --model lgbm --freq daily --mode predict-only --allow-universe-fallback
         """,
     )
     parser.add_argument("--model", default="lgbm", help="模型名（lgbm/mlp/lstm，默认 lgbm）")
@@ -1134,6 +1357,26 @@ def main() -> None:
         default=None,
         help="推荐股票数（默认读 configs/live/daily_live.yaml 的 live.topk）",
     )
+    parser.add_argument(
+        "--allow-universe-fallback",
+        action="store_true",
+        default=False,
+        help=(
+            "universe 查询异常时退回全量预测（默认关闭）。"
+            "启用后选股范围不再限于 tradable_universe，请谨慎使用。"
+        ),
+    )
+    parser.add_argument(
+        "--label-horizon",
+        type=int,
+        default=None,
+        metavar="N",
+        help=(
+            "[仅 retrain-and-predict 模式有效] 标签预测周期（交易日数）。"
+            "覆盖 base.yaml 的 label 表达式为 N 日标签，与 run_experiment.py 的同名参数对应。"
+            "predict-only 模式会自动从 model_meta.json 读取 label_horizon，无需手动指定。"
+        ),
+    )
     args = parser.parse_args()
 
     wall_start = time.perf_counter()
@@ -1151,6 +1394,7 @@ def main() -> None:
     score_quantile = live_params.get("score_quantile", 0.0)
     min_score_threshold = live_params.get("min_score_threshold")
     drop_signal_quantile = live_params.get("drop_signal_quantile", 0.3)
+    weight_method = live_params.get("weight_method", "equal")
     tradable_universe = live_cfg_raw.get("experiment", {}).get("tradable_universe", "csi500")
     provider_uri = live_cfg_raw.get("qlib_init", {}).get("provider_uri", "D:/qlib_data/qlib_data")
 
@@ -1174,18 +1418,39 @@ def main() -> None:
         print(f"\n  预测日期: {predict_date}（自动读取 Qlib 最新可用日期）")
     print(f"  预测日期: {predict_date}")
 
-    # ── 加载配置（注入动态 date） ──────────────────────────────────
-    cfg = load_live_config(model_name, freq_name, predict_date)
+    # ── 模型获取（加载 or 重训） ───────────────────────────────────
+    # 注意：必须先加载/训练模型，才能从 model_meta 中读出 label_horizon，
+    # 再传给 load_live_config 以保持训练与推理的 label 口径一致。
+    print(f"\n  模式: {args.mode}")
+    if args.mode == "predict-only":
+        model, model_meta = load_latest_model(model_name, freq_name)
+        # 从 meta 读取训练时使用的 label_horizon（若有）
+        label_horizon: Optional[int] = model_meta.get("label_horizon")
+        if label_horizon is not None:
+            print(f"  标签周期: {label_horizon} 日（来自 model_meta.label_horizon）")
+    else:
+        # retrain-and-predict：先加载不含 label_horizon 的基础配置来构建数据集，
+        # 再根据 --label-horizon CLI 参数（若有）动态注入
+        label_horizon = args.label_horizon
+        model_meta = {}
+
+    # ── 加载配置（注入动态 date + label_horizon）──────────────────
+    cfg = load_live_config(model_name, freq_name, predict_date,
+                           label_horizon=label_horizon)
     cfg = inject_feature_config(cfg)
 
     run_id = f"{model_name}_{freq_name}_live_{predict_date}"
 
-    # ── 模型获取（加载 or 重训） ───────────────────────────────────
-    print(f"\n  模式: {args.mode}")
-    if args.mode == "predict-only":
-        model, model_meta = load_latest_model(model_name, freq_name)
-    else:
-        # retrain-and-predict：先构建 dataset（full train），再训练
+    # 用确定的 run_id 初始化结构化日志器（覆盖模块级占位）
+    global LOGGER
+    LOGGER = _make_logger(run_id=run_id)
+    LOGGER.info(
+        "predict_live_start: model=%s freq=%s mode=%s date=%s label_horizon=%s version=%s",
+        model_name, freq_name, args.mode, predict_date,
+        label_horizon or "default(1d)", VERSION,
+    )
+
+    if args.mode == "retrain-and-predict":
         from qlib.utils import init_instance_by_config
         print("  构建训练数据集...")
         dataset = init_instance_by_config(cfg["dataset"])
@@ -1211,6 +1476,7 @@ def main() -> None:
     pred_score = filter_to_universe(
         pred_score, tradable_universe, predict_date, run_id,
         provider_uri=provider_uri,
+        allow_fallback=args.allow_universe_fallback,
     )
 
     # ── 构建过滤器 + 选股 ─────────────────────────────────────────
@@ -1251,6 +1517,7 @@ def main() -> None:
         stock_filter=stock_filter if filter_active else None,
         exclude_st=exclude_st,
         exclude_limit_up=exclude_limit_up,
+        weight_method=weight_method,
     )
     if exclusion_log:
         print(f"  [过滤] 共排除 {len(exclusion_log)} 支，已补充替代股票")
@@ -1272,31 +1539,41 @@ def main() -> None:
 
     # ── 打印结果摘要 ──────────────────────────────────────────────
     total_sec = round(time.perf_counter() - wall_start, 2)
-    top_df = selection[selection["change"] != "drop_out"]
+    exit_changes = {"drop_out", "reduce"}
+    top_df = selection[~selection["change"].isin(exit_changes)]
     drop_df = selection[selection["change"] == "drop_out"]
+    reduce_df = selection[selection["change"] == "reduce"]
 
     print(f"\n{'='*60}")
     print(f"  预测日期: {predict_date}   耗时: {total_sec}s")
     print(f"  输出目录: {output_dir}")
     print(f"  {'─'*50}")
+    print(f"  今日推荐持仓（TopK={topk}，T+1 参考执行）:")
+    print(f"  {'─'*50}")
     print(f"  {'排名':<6} {'股票代码':<14} {'打分':>10} {'百分位':>8} {'权重':>8} {'变化'}")
     print(f"  {'─'*50}")
     for _, row in top_df.iterrows():
-        change_str = {"new_in": "★新入", "hold": "  持续", "drop_out": "↓退出"}.get(
-            row["change"], row["change"]
-        )
+        change_str = {"new_in": "★买入", "hold": "  持有"}.get(row["change"], row["change"])
         pct_str = f"{row.get('percentile', 0):.1f}%"
         w_str = f"{float(row['suggested_weight']):.1%}"
         print(
             f"  {int(row['rank']):<6} {row['instrument']:<14} "
             f"{float(row['score']):>10.4f} {pct_str:>8} {w_str:>8} {change_str}"
         )
+    if not reduce_df.empty:
+        print(f"  {'─'*50}")
+        print(f"  ▷ 考虑调仓（排名调出 TopK，可逐步减仓或观望次日）:")
+        for _, row in reduce_df.iterrows():
+            score_str = f"{float(row['score']):.4f}" if not math.isnan(float(row["score"])) else "—"
+            pct_str = f"{row.get('percentile', 0):.1f}%"
+            print(f"    ▷ {row['instrument']}  今日打分={score_str}  百分位={pct_str}")
     if not drop_df.empty:
         print(f"  {'─'*50}")
-        print(f"  建议减仓/退出（打分下滑明显）:")
+        print(f"  ✕ 建议清仓（今日打分跌破 {drop_signal_quantile*100:.0f} 分位，信号明显恶化）:")
         for _, row in drop_df.iterrows():
             score_str = f"{float(row['score']):.4f}" if not math.isnan(float(row["score"])) else "—"
-            print(f"    ↓ {row['instrument']}  今日打分={score_str}")
+            pct_str = f"{row.get('percentile', 0):.1f}%"
+            print(f"    ✕ {row['instrument']}  今日打分={score_str}  百分位={pct_str}")
     print(f"{'='*60}")
     print(f"  查看完整报告: {output_dir / 'report.html'}\n")
 

@@ -202,23 +202,22 @@ attrib +R "D:\qlib_data\qlib_data_train_202605\*" /S /D
 
 ### 流程 A：日常预测（每天 1 次，**不重训**）
 
-
-
-
-
 cd D:\quant_project\qlibQuantData
 
 # 第一步：下载今天的 CSV（先确认 API 通了再跑）
 
-.\incremental_update.ps1 -Universe Csi500 -StartDate 20260513 -EndDate 20260513 -CsvDir D:\qlib_data\csv_data\csi500_update -QlibDir D:\qlib_data\qlib_data -Stage download
+.\incremental_update.ps1 -Universe Csi500 -StartDate 20260515 -EndDate 20260515 -CsvDir D:\qlib_data\csv_data\csi500_update515 -QlibDir D:\qlib_data\qlib_data -Stage download
 
 # 第二步：确认 CSV 有数据后，转 bin（DumpDataUpdate 增量）
 
-.\incremental_update.ps1 -Universe Csi500 -StartDate 20260509 -EndDate 20260513 -CsvDir D:\qlib_data\csv_data\csi500_update -QlibDir D:\qlib_data\qlib_data -Stage convert
+.\incremental_update.ps1 -Universe Csi500 -StartDate 20260515 -EndDate 20260515 -CsvDir D:\qlib_data\csv_data\csi500_update515 -QlibDir D:\qlib_data\qlib_data -Stage convert
 
 
 
+# 第三 全量更新
 
+.\incremental_update.ps1 -Universe Full -StartDate 20260507 -EndDate 20260515 `
+  -CsvDir D:\qlib_data\csv_data -QlibDir D:\qlib_data\qlib_data -Stage all
 
 #### A.0 触发时机
 
@@ -248,7 +247,7 @@ Get-Item D:\qlib_data\qlib_data\instruments\csi500.txt
 ```powershell
 # Step 1（可选但推荐）：先做 LIVE 数据指纹快照，便于事后追溯
 python scripts/check_qlib_data_fingerprint.py snapshot `
-  --label daily_$(Get-Date -Format yyyyMMdd)
+  --label daily_$(Get-Date -Format 20260514)
 
 # Step 2：用上线模型 + LIVE 数据生成今日 TopK 选股
 python python/predict_live.py --model lgbm --freq daily --mode predict-only

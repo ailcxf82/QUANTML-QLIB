@@ -207,8 +207,11 @@ def infer_purge_days(label_expr: str) -> int:
     解析规则：扫描所有 Ref($xxx, -k) 形式，取最大 |k| 再 +1（安全余量）。
     失败或无匹配时返回保守默认值 3。
 
-    示例：
+    示例（1 日标签）：
       "Ref($close_qfq,-2)/Ref($close_qfq,-1)-1" → max(2, 1) + 1 = 3
+
+    示例（5 日标签）：
+      "Ref($close_qfq,-6)/Ref($close_qfq,-1)-1" → max(6, 1) + 1 = 7
     """
     try:
         matches = re.findall(r"Ref\s*\([^,]+,\s*(-?\d+)\s*\)", label_expr, re.IGNORECASE)

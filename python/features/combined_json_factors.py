@@ -11,7 +11,11 @@ RDAgent IC 筛选因子池：JSON 名称 → Qlib 表达式映射。
 使用方式:
   1. 在 model_meta.combined_factors_json 中指向一个 JSON 文件（结构见
      configs/combined_factors_df.json，至少含 factors:list[{name:str}]）
-  2. JSON 中每个 name 必须在本文件 _EXPR_BY_JSON_NAME 中有映射；否则抛 ValueError
+  2. 表达式解析优先级（先后顺序）：
+     a. JSON entry 中携带 "qlib_expr" 字段 → 直接使用（无需改代码即可扩展新因子）
+     b. JSON entry 中携带 "expr" 字段 → 向后兼容别名
+     c. 在本文件 _EXPR_BY_JSON_NAME 字典中查找 → 内置映射表（旧路径兼容）
+     若以上均未命中则抛 ValueError
   3. 同义因子（如 liq_turnover_f / turnover_rate_f / raw_turnover_rate_f）
      共享同一表达式，可在 JSON 中用任一别名
 
@@ -217,15 +221,25 @@ def merge_features_from_combined_json(
         name = raw_name.strip()
         if name in existing:
             continue
-        expr = _EXPR_BY_JSON_NAME.get(name)
-        if expr is None:
+
+        # 表达式解析优先级：
+        # 1. JSON entry 中的 "qlib_expr" 字段（推荐：新因子直接在 JSON 中携带表达式）
+        # 2. JSON entry 中的 "expr" 字段（备选别名）
+        # 3. 内置 _EXPR_BY_JSON_NAME 映射表（向后兼容旧 JSON）
+        expr = (
+            entry.get("qlib_expr")
+            or entry.get("expr")
+            or _EXPR_BY_JSON_NAME.get(name)
+        )
+        if not isinstance(expr, str) or not expr.strip():
             raise ValueError(
-                f"combined_factors JSON 中的因子名 '{name}' 尚无内置 Qlib 表达式映射，"
-                f"请在 python/features/combined_json_factors.py 的 _EXPR_BY_JSON_NAME "
-                f"中补充。当前已支持 {len(_EXPR_BY_JSON_NAME)} 个名称："
+                f"combined_factors JSON 中的因子名 '{name}' 尚无 Qlib 表达式。"
+                f"可在 JSON entry 中添加 \"qlib_expr\" 字段，"
+                f"或在 python/features/combined_json_factors.py 的 _EXPR_BY_JSON_NAME "
+                f"中补充。当前内置已支持 {len(_EXPR_BY_JSON_NAME)} 个名称："
                 f"{_list_supported_names()}"
             )
-        exprs.append(expr)
+        exprs.append(expr.strip())
         names.append(name)
         existing.add(name)
 

@@ -1,0 +1,75 @@
+# 日频 + 5 日标签（day-5d_label）频率配置
+# ============================================
+# 与 daily.yaml 的唯一区别：label 从 T+1→T+2 单日回报改为 T+1→T+6 五日回报。
+#
+# 为什么用 5 日标签？
+#   - 单日标签噪声极大（IC_std ≈ 0.21），降低 ICIR 的主要瓶颈
+#   - 5 日回报噪声下降 ~50%（理论：σ_5d ≈ σ_1d / √5），ICIR 预期提升 0.1~0.15
+#   - 信号依然每日更新（每日重排名），只是训练目标更稳定
+#
+# 标签对齐说明：
+#   label = Ref($close_qfq,-6)/Ref($close_qfq,-1)-1
+#         = (T+6 收盘价) / (T+1 收盘价) - 1
+#         = 从 T+1 收盘持有至 T+6 收盘的 5 日累计回报
+#   执行：deal_price=close，策略在 T 日收盘后生成信号，T+1 日收盘执行
+#   捕获：T+1 → T+2 的单日回报（每日换仓），但训练目标对齐 5 日方向
+#   => 模型学会"挑选 5 日方向向上的股票"，每日截面排名用于 TopK 选股
+#
+# 数据边界：
+#   test 末端 5 个交易日（约 2026-05-06 之后）的标签为 NaN（需 Ref(-6) 的未来数据）
+#   SignalLayer.compute_ic_series 已按日 dropna，末端自动跳过，不影响 IC 计算
+#   DropnaLabel 处理器在 train/valid 中自动丢弃末端无标签行
+#
+# Walk-Forward purge_days：
+#   infer_purge_days("Ref($close_qfq,-6)/...") → max(6,1)+1 = 7 天
+#   WF 会自动推导，也可通过 --rolling-purge-days 8 显式指定（保守多 1 天）
+#
+# 策略建议：
+#   5 日信号更稳定 → 换仓可适当变慢 → 建议将 n_drop 保持 1（不变）
+#   或用 --strategy-cfg configs/strategy/daily_5d_sl_tp.yaml 覆盖
+
+freq_meta:
+  name: "daily_5d_label"
+  freq_key: "1day"
+
+# 沿用 daily.yaml 时间切分（不动，方便对比）
+dataset_segments:
+  train: ["2020-01-01", "2023-12-31"]
+  valid: ["2024-01-01", "2024-12-31"]
+  test:  ["2025-01-01", "2026-05-12"]
+
+# 覆盖 base.yaml 中 dataset.kwargs.handler.kwargs.data_loader.kwargs.config.label
+# deep_merge 会将 list 整体替换（非追加），此处可安全覆盖
+dataset:
+  kwargs:
+    handler:
+      kwargs:
+        # handler end_time 同 base.yaml（2026-04-30）已足够：
+        # Ref(-6) 最远需要 test_end + 6 交易日的收盘价，但 test_end=2026-05-12
+        # 而数据只到 2026-04-30，因此 2026-04-22 之后的行标签会是 NaN，
+        # DropnaLabel / SignalLayer 会自动处理（见上方数据边界说明）。
+        # 若后续 test_end 延伸，需同步更新 handler.kwargs.end_time。
+        end_time: "2026-05-14"   # 比 test_end 多留 2 个交易日冗余
+        data_loader:
+          kwargs:
+            config:
+              label:
+                - - "Ref($close_qfq,-6)/Ref($close_qfq,-1)-1"
+                - - "LABEL0"
+
+executor:
+  class: "SimulatorExecutor"
+  module_path: "qlib.backtest.executor"
+  kwargs:
+    time_per_step: "day"
+    generate_portfolio_metrics: true
+
+backtest:
+  exchange_kwargs:
+    freq: "day"
+    limit_threshold: 0.095
+    deal_price: "close"
+    open_cost: 0.0025
+    close_cost: 0.0035
+    min_cost: 5
+    impact_cost: 0

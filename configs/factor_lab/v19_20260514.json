@@ -1,0 +1,31 @@
+{
+  "created_at": "2026-05-15",
+  "purpose": "对照 combined_factors_df_expressions_v19_20260514_2021.md 的 15 因子组合，在因子试验台跑 lgbm_lab 隔离实验。",
+  "source_md": "configs/combined_factors_df_expressions_v19_20260514_2021.md",
+  "compare_to": "base_only",
+  "n_factors": 15,
+  "expected_total_features": "20 base + 15 combined = 35 维",
+  "factors": [
+    { "name": "rank_close_open" },
+    { "name": "close_location" },
+    { "name": "log_signed_volume" },
+    { "name": "ValueMR_20D" },
+    { "name": "close_location_ma_5" },
+    { "name": "earnings_yield_momentum_5d_interaction" },
+    { "name": "winsorized_zscore_volume_ratio" },
+    { "name": "turnover_surprise_20" },
+    { "name": "turnover_acceleration_5d" },
+    {
+      "name": "overnight_return_5d_avg",
+      "qlib_expr": "Mean(($open_qfq-Ref($close_qfq,1))/(Ref($close_qfq,1)+1e-12),5)"
+    },
+    { "name": "sma_volume_ratio_10d" },
+    {
+      "name": "amihud_illiquidity_20d",
+      "qlib_expr": "Mean(Abs($close_qfq/(Ref($close_qfq,1)+1e-12)-1)/($close_qfq*$volume+1e-12),20)"
+    },
+    { "name": "intraday_range" },
+    { "name": "turnover_accel_5d" },
+    { "name": "volume_ratio_ma_15d" }
+  ]
+}

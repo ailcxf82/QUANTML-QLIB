@@ -1,7 +1,31 @@
-pyqlib
-pandas
-pyyaml
-pyarrow
-lightgbm
-matplotlib
-numpy
+# 核心量化框架
+pyqlib==0.9.7
+
+# 数据处理
+pandas==2.3.3
+numpy==1.26.4
+pyarrow==22.0.0
+PyYAML==6.0.3
+
+# 模型
+lightgbm==4.6.0
+scikit-learn==1.8.0
+scipy==1.17.1
+
+# 深度学习（可选，仅 MLP/LSTM/GRU/Transformer 模型需要）
+# torch==2.11.0+cu128   # GPU 版本按实际 CUDA 版本安装，此处注释供参考
+
+# 可视化与报告
+matplotlib==3.10.8
+Jinja2==3.1.6
+
+# 模型持久化（joblib 通常随 scikit-learn 安装，显式列出确保可用）
+joblib==1.5.3
+
+# 数据源（至少安装一个）
+# baostock            # 免费 A 股日频数据，pip install baostock
+# tushare==1.4.29     # 需要 token，pip install tushare
+
+# 开发与测试
+# pytest>=7.0
+# pytest-cov

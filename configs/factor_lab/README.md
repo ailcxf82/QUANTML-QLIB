@@ -47,8 +47,23 @@
 | `warning` | 已知风险或反例证据（list[str]） |
 
 约束：
-- `factors[].name` 必须在 `[python/features/combined_json_factors.py](../../python/features/combined_json_factors.py)` 的 `_EXPR_BY_JSON_NAME` 中有表达式映射；否则训练阶段会报 `ValueError`。
-- 若需要新增因子，先在 `_EXPR_BY_JSON_NAME` 加映射，再在 json 里引用。
+- 表达式解析优先级（先后顺序）：
+  1. **JSON entry 中携带 `"qlib_expr"` 字段（推荐）**：直接使用，无需改代码即可扩展新因子。
+  2. JSON entry 中携带 `"expr"` 字段：备选别名。
+  3. `python/features/combined_json_factors.py` 的 `_EXPR_BY_JSON_NAME` 字典：向后兼容旧 JSON。
+  
+- 若三者均未命中，训练阶段会报 `ValueError`，请补全 `qlib_expr` 或 `_EXPR_BY_JSON_NAME`。
+
+**推荐的新因子写法（自带表达式，无需修改 Python 代码）：**
+
+```json
+{
+  "factors": [
+    { "name": "my_new_factor", "qlib_expr": "($close_qfq - Mean($close_qfq, 20)) / (Std($close_qfq, 20) + 1e-12)" },
+    { "name": "log_signed_volume" }
+  ]
+}
+```
 
 ## 4. 与生产线的边界
 
