@@ -212,12 +212,13 @@ cd D:\quant_project\qlibQuantData
 
 .\incremental_update.ps1 -Universe Csi500 -StartDate 20260515 -EndDate 20260515 -CsvDir D:\qlib_data\csv_data\csi500_update515 -QlibDir D:\qlib_data\qlib_data -Stage convert
 
-
-
 # 第三 全量更新
 
-.\incremental_update.ps1 -Universe Full -StartDate 20260507 -EndDate 20260515 `
+.\incremental_update.ps1 -Universe Full -StartDate 20260507 -EndDate 20260513 `
+
   -CsvDir D:\qlib_data\csv_data -QlibDir D:\qlib_data\qlib_data -Stage all
+
+  .\incremental_update.ps1 -Universe Full -StartDate 20260507 -EndDate 20260513 -CsvDir D:\qlib_data\csv_data -QlibDir D:\qlib_data\qlib_data -Stage convert
 
 #### A.0 触发时机
 
@@ -324,7 +325,7 @@ git log --oneline -10 -- configs/combined_factors_df.json configs/factor_lab/
 
 ```powershell
 # ─── Step 1：冻结新一份数据快照 ───────────────────────────
-$MONTH = Get-Date -Format 20260513
+$MONTH = Get-Date -Format 20260516
 $DEST = "D:\qlib_data\qlib_data_train_$MONTH"
 
 robocopy D:\qlib_data\qlib_data $DEST /MIR /MT:16 /NFL /NDL /NJH /NJS /R:1 /W:1

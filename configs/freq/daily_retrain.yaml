@@ -28,7 +28,7 @@ freq_meta:
 
 # ⭐️ 关键覆盖：指向冻结快照（每月手动同步）
 qlib_init:
-  provider_uri: "D:/qlib_data/qlib_data_train_20260513"
+  provider_uri: "D:/qlib_data/qlib_data_train_20260516"
   region: cn
 
 executor:
