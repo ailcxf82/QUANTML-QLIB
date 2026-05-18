@@ -42,6 +42,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from features import build_feature_config
 from features.combined_json_factors import merge_features_from_combined_json
+from backtest.strategy.market_timer import MarketTimerBase, build_market_timer
 
 WORKSPACE_ROOT = Path(__file__).resolve().parents[1]
 PREDICTIONS_BASE = WORKSPACE_ROOT / "predictions"
@@ -879,6 +880,215 @@ def add_stock_names(selection: pd.DataFrame) -> pd.DataFrame:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# 调仓计划：根据账户资金、收盘价、目标权重计算具体买卖手数
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _fetch_close_prices(
+    instruments: List[str],
+    predict_date: str,
+) -> Dict[str, float]:
+    """
+    从 Qlib 获取 predict_date 当日（或最近可用日）的收盘价。
+
+    Returns:
+        {instrument: close_price}，获取失败的标的不包含在内
+    """
+    try:
+        from qlib.data import D
+        df = D.features(
+            instruments,
+            fields=["$close_qfq"],
+            start_time=predict_date,
+            end_time=predict_date,
+            freq="day",
+        )
+        if df is None or df.empty:
+            # 尝试最近一个有效交易日
+            prior = (pd.Timestamp(predict_date) - pd.Timedelta(days=5)).strftime("%Y-%m-%d")
+            df = D.features(instruments, ["$close_qfq"], start_time=prior, end_time=predict_date, freq="day")
+            if df is None or df.empty:
+                return {}
+        # MultiIndex (instrument, datetime) → 取最新日期
+        prices: Dict[str, float] = {}
+        for inst in instruments:
+            try:
+                sub = df.xs(inst, level="instrument")["$close_qfq"]
+                px = float(sub.dropna().iloc[-1])
+                if px > 0 and math.isfinite(px):
+                    prices[inst] = px
+            except Exception:
+                pass
+        return prices
+    except Exception:
+        return {}
+
+
+def compute_trade_plan(
+    selection: pd.DataFrame,
+    predict_date: str,
+    account_total: float,
+    trade_unit: int,
+    prev_selection: Optional[pd.DataFrame],
+) -> pd.DataFrame:
+    """
+    在 selection 上追加具体调仓字段，供控制台和报告使用。
+
+    新增列：
+        close_price   : T 日收盘价（元/股）
+        target_value  : 目标持仓金额 = account_total × actual_weight
+        target_shares : 目标持仓股数（取整到 trade_unit 的整数倍）
+        prev_shares   : 上期推荐持仓股数（根据前日 selection 估算，0 表示未持有）
+        trade_shares  : 需要交易的股数（正=买入，负=卖出，0=不动）
+        trade_value   : 预计交易金额（元，正=买入金额，负=卖出金额）
+        action_cn     : 中文操作说明（"买入 X 手"、"卖出 X 手"、"持有"、"清仓"）
+
+    注：
+        prev_shares 是根据前日 actual_weight × account / 前日价格计算的估算值，
+        前提是用户严格按照上期推荐执行。若实际持仓与推荐不符，请以实际持仓为准。
+    """
+    selection = selection.copy()
+    exit_changes = {"drop_out", "reduce"}
+
+    # 获取所有相关标的（含减仓/清仓）的收盘价
+    all_insts = selection["instrument"].tolist()
+    prices = _fetch_close_prices(all_insts, predict_date)
+
+    # 重建上期持仓股数（估算）
+    prev_shares_map: Dict[str, int] = {}
+    if prev_selection is not None and not prev_selection.empty:
+        prev_top = prev_selection[~prev_selection["change"].isin(exit_changes)]
+        prev_date = prev_top["predict_date"].iloc[0] if "predict_date" in prev_top.columns and not prev_top.empty else None
+        if prev_date:
+            prev_prices = _fetch_close_prices(prev_top["instrument"].tolist(), str(prev_date))
+            prev_acct = account_total  # 假设账户规模不变
+            for _, row in prev_top.iterrows():
+                inst = str(row["instrument"])
+                aw = float(row.get("actual_weight", row.get("suggested_weight", 0.0)))
+                ppx = prev_prices.get(inst, prices.get(inst, 0.0))
+                if ppx > 0 and aw > 0:
+                    raw = prev_acct * aw / ppx
+                    prev_shares_map[inst] = int(raw // trade_unit) * trade_unit
+
+    # 计算每行的调仓字段
+    rows_out = []
+    for _, row in selection.iterrows():
+        inst = str(row["instrument"])
+        aw = float(row.get("actual_weight", 0.0))
+        chg = str(row.get("change", ""))
+        px = prices.get(inst, 0.0)
+        prev_sh = prev_shares_map.get(inst, 0)
+
+        target_val = round(account_total * aw, 2)
+        if px > 0 and aw > 0:
+            raw_sh = account_total * aw / px
+            target_sh = int(raw_sh // trade_unit) * trade_unit
+        else:
+            target_sh = 0
+
+        # reduce/drop_out: 目标股数为 0
+        if chg in exit_changes:
+            target_sh = 0
+            target_val = 0.0
+
+        trade_sh = target_sh - prev_sh
+        trade_val = round(trade_sh * px, 2) if px > 0 else 0.0
+
+        # 中文操作说明
+        lots = abs(trade_sh) // trade_unit
+        if trade_sh > 0:
+            action_cn = f"买入 {lots} 手 ({trade_sh}股，约{abs(trade_val)/1e4:.1f}万)"
+        elif trade_sh < 0:
+            action_cn = f"卖出 {lots} 手 ({abs(trade_sh)}股，约{abs(trade_val)/1e4:.1f}万)"
+        elif chg == "hold" and target_sh > 0:
+            action_cn = f"持有 (共{target_sh}股，约{target_val/1e4:.1f}万)"
+        elif chg in ("reduce", "drop_out") and prev_sh > 0:
+            lots2 = prev_sh // trade_unit
+            action_cn = f"[参考]减仓/清仓 ({lots2}手)"
+        else:
+            action_cn = "持有"
+
+        r = row.to_dict()
+        r.update({
+            "close_price": round(px, 3) if px > 0 else float("nan"),
+            "target_value": target_val,
+            "target_shares": target_sh,
+            "prev_shares": prev_sh,
+            "trade_shares": trade_sh,
+            "trade_value": trade_val,
+            "action_cn": action_cn,
+        })
+        rows_out.append(r)
+
+    return pd.DataFrame(rows_out)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# MarketTimer：每日仓位缩放因子
+# ─────────────────────────────────────────────────────────────────────────────
+
+def compute_risk_factor(
+    market_timer_cfg: Dict[str, Any],
+    predict_date: str,
+) -> Tuple[float, Optional[MarketTimerBase]]:
+    """
+    根据配置构建 MarketTimer 并计算当日仓位缩放因子。
+
+    Args:
+        market_timer_cfg: daily_live.yaml 中 market_timer 段，含 enabled/type 等字段
+        predict_date:     信号生成日期（收盘后）= T 日
+
+    Returns:
+        (risk_factor, timer_instance)
+        - risk_factor: 仓位缩放比例（满仓=1.0，减仓<1.0）
+        - timer_instance: MarketTimerBase 对象（None 表示未启用）
+
+    时序说明（无前视）：
+        predict_date = T（今日收盘，信号生成）
+        T+1 = 执行日（下一交易日开盘下单）
+        GARCH 使用数据截止 T 日（调用 get_risk_factor(T+1)，内部截止 T）
+        → 用"今日已知的市场信息"预测"明日执行时"的波动率
+    """
+    if not market_timer_cfg.get("enabled", True):
+        return 1.0, None
+
+    timer_type = market_timer_cfg.get("type", "garch")
+    if timer_type == "null":
+        return 1.0, None
+
+    try:
+        timer = build_market_timer(market_timer_cfg)
+        if timer is None:
+            return 1.0, None
+
+        # 调用 get_risk_factor(T+1)，函数内部截止 T 日数据（无前视）
+        exec_date = pd.Timestamp(predict_date) + pd.Timedelta(days=1)
+        rf = timer.get_risk_factor(exec_date)
+        return float(rf), timer
+    except Exception as exc:
+        print(f"  [MarketTimer] 计算失败（{exc}），退化为满仓 risk_factor=1.0")
+        return 1.0, None
+
+
+def apply_risk_factor(selection: pd.DataFrame, risk_factor: float) -> pd.DataFrame:
+    """
+    将 risk_factor 应用到选股列表，新增 actual_weight 列。
+
+    规则：
+    - 持仓行（new_in / hold）：actual_weight = suggested_weight × risk_factor
+    - 清仓/调仓行（drop_out / reduce）：actual_weight = 0.0（不受影响）
+    """
+    selection = selection.copy()
+    exit_changes = {"drop_out", "reduce"}
+    is_position = ~selection["change"].isin(exit_changes)
+    selection["risk_factor"] = round(risk_factor, 4)
+    selection["actual_weight"] = selection["suggested_weight"].where(~is_position, 0.0)
+    selection.loc[is_position, "actual_weight"] = (
+        selection.loc[is_position, "suggested_weight"] * risk_factor
+    ).round(4)
+    return selection
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # 持久化
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -889,6 +1099,7 @@ def persist_prediction(
     model_meta: Dict[str, Any],
     live_cfg: Dict[str, Any],
     exclusion_log: Optional[List[Dict[str, Any]]] = None,
+    risk_factor: float = 1.0,
 ) -> Path:
     """将今日预测结果写入 predictions/<date>/ 目录。
 
@@ -918,6 +1129,7 @@ def persist_prediction(
     html = _build_report_html(
         predict_date, selection, pred_score, model_meta, live_cfg,
         exclusion_log=exclusion_log or [],
+        risk_factor=risk_factor,
     )
     (output_dir / "report.html").write_text(html, encoding="utf-8")
 
@@ -935,6 +1147,7 @@ def _build_report_html(
     model_meta: Dict[str, Any],
     live_cfg: Dict[str, Any],
     exclusion_log: Optional[List[Dict[str, Any]]] = None,
+    risk_factor: float = 1.0,
 ) -> str:
     """生成完整 HTML 预测报告。"""
 
@@ -966,6 +1179,41 @@ def _build_report_html(
         )
 
     # 今日推荐表
+    # MarketTimer 风险标识区块
+    rf_pct = risk_factor * 100
+    if risk_factor >= 0.90:
+        rf_color, rf_label, rf_bg = "#27ae60", "低波动·满仓", "#eafaf1"
+    elif risk_factor >= 0.60:
+        rf_color, rf_label, rf_bg = "#e67e22", "中波动·适度减仓", "#fef9e7"
+    else:
+        rf_color, rf_label, rf_bg = "#e74c3c", "高波动·大幅减仓", "#fdf2f8"
+
+    risk_banner_html = f"""
+    <div class="section" style="border-left:4px solid {rf_color};background:{rf_bg}">
+      <h2 style="border-color:{rf_color}">市场波动风控（MarketTimer）</h2>
+      <div style="display:flex;align-items:center;gap:24px;flex-wrap:wrap">
+        <div style="text-align:center">
+          <div style="font-size:36px;font-weight:700;color:{rf_color}">{rf_pct:.1f}%</div>
+          <div style="font-size:12px;color:#666">仓位系数 risk_factor</div>
+        </div>
+        <div>
+          <div style="font-size:16px;font-weight:600;color:{rf_color};margin-bottom:6px">{rf_label}</div>
+          <div style="font-size:13px;color:#555">
+            CSI500 当前波动 {'高于' if risk_factor < 1.0 else '低于或等于'} 目标波动率（15% 年化）<br>
+            实际建议仓位 = 等权仓位 × <strong>{risk_factor:.2%}</strong>
+          </div>
+        </div>
+        <div style="flex:1;min-width:200px">
+          <div style="background:#e8eaf0;border-radius:8px;height:16px;position:relative">
+            <div style="background:{rf_color};width:{min(rf_pct, 100):.1f}%;height:100%;border-radius:8px"></div>
+          </div>
+          <div style="display:flex;justify-content:space-between;font-size:11px;color:#999;margin-top:4px">
+            <span>30%（下限）</span><span>100%（满仓）</span>
+          </div>
+        </div>
+      </div>
+    </div>"""
+
     max_s = float(topk_df["score"].max()) if not topk_df.empty else 1.0
     rec_rows = ""
     for _, row in topk_df.iterrows():
@@ -974,6 +1222,10 @@ def _build_report_html(
         if not math.isnan(float(prev_s if prev_s is not None else float("nan"))):
             delta = float(row["score"]) - float(prev_s)
             trend = f'<span style="color:{"#2ecc71" if delta>=0 else "#e74c3c"}">{delta:+.4f}</span>'
+        actual_w = row.get("actual_weight", row.get("suggested_weight", 0.0))
+        actual_w_str = f"{float(actual_w):.1%}"
+        # 若 actual_weight < suggested_weight，用橙色高亮
+        w_style = f'color:{rf_color};font-weight:600' if risk_factor < 0.99 else ''
         rec_rows += f"""
         <tr>
           <td style="font-weight:600">{row.get('name', row['instrument'])}<br>
@@ -982,6 +1234,7 @@ def _build_report_html(
           <td>{_score_bar(float(row['score']), max_s)}</td>
           <td style="text-align:center">{row.get('percentile',0):.1f}%</td>
           <td style="text-align:center">{float(row['suggested_weight']):.1%}</td>
+          <td style="text-align:center;{w_style}">{actual_w_str}</td>
           <td style="text-align:center">{_change_badge(row['change'])}</td>
           <td style="text-align:center">{trend if trend else '—'}</td>
         </tr>"""
@@ -1001,7 +1254,76 @@ def _build_report_html(
             for c in codes
         )
 
-    action_summary_html = f"""
+    # 详细调仓计划表（核心新功能）
+    account_total_html = live_cfg.get("account", {}).get("total_value", 300000)
+    trade_unit_html = live_cfg.get("account", {}).get("trade_unit", 100)
+
+    def _trade_badge(action: str) -> str:
+        if not action or action == "持有":
+            return f'<span style="background:#3498db;color:#fff;padding:2px 8px;border-radius:4px;font-size:11px">持有</span>'
+        if action.startswith("买入"):
+            return f'<span style="background:#2ecc71;color:#fff;padding:2px 8px;border-radius:4px;font-size:11px">{action}</span>'
+        if action.startswith("卖出") or action.startswith("清仓") or "[参考]" in action:
+            return f'<span style="background:#e74c3c;color:#fff;padding:2px 8px;border-radius:4px;font-size:11px">{action}</span>'
+        return f'<span style="background:#95a5a6;color:#fff;padding:2px 8px;border-radius:4px;font-size:11px">{action}</span>'
+
+    trade_plan_rows = ""
+    for _, row in topk_df.iterrows():
+        inst = row["instrument"]
+        action = row.get("action_cn", "持有")
+        px = row.get("close_price", float("nan"))
+        px_str = f"¥{float(px):.2f}" if math.isfinite(float(px)) else "—"
+        tsh = int(row.get("target_shares", 0))
+        psh = int(row.get("prev_shares", 0))
+        tval = float(row.get("target_value", 0.0))
+        tsh_str = f"{tsh}股 (¥{tval/1e4:.1f}万)" if tsh > 0 else "—"
+        psh_str = f"{psh}股" if psh > 0 else "新建仓"
+        trade_plan_rows += f"""
+        <tr>
+          <td style="font-weight:600">{inst}</td>
+          <td style="text-align:center">{px_str}</td>
+          <td style="text-align:center">{psh_str}</td>
+          <td style="text-align:center">{tsh_str}</td>
+          <td>{_trade_badge(action)}</td>
+        </tr>"""
+
+    for _, row in pd.concat([reduce_df, drop_df], ignore_index=True).iterrows():
+        inst = row["instrument"]
+        action = row.get("action_cn", "减仓")
+        px = row.get("close_price", float("nan"))
+        px_str = f"¥{float(px):.2f}" if math.isfinite(float(px)) else "—"
+        psh = int(row.get("prev_shares", 0))
+        psh_str = f"{psh}股" if psh > 0 else "持有中"
+        trade_plan_rows += f"""
+        <tr style="opacity:.75">
+          <td style="font-weight:600">{inst}</td>
+          <td style="text-align:center">{px_str}</td>
+          <td style="text-align:center">{psh_str}</td>
+          <td style="text-align:center">0股</td>
+          <td>{_trade_badge(action)}</td>
+        </tr>"""
+
+    trade_plan_html = f"""
+    <div class="section" style="border-left:4px solid #2ecc71">
+      <h2>明日 T+1 调仓操作计划（账户 ¥{account_total_html/1e4:.0f}万 / 最小手数 {trade_unit_html}股）</h2>
+      <table>
+        <tr>
+          <th>股票代码</th>
+          <th style="text-align:center">今日收盘价</th>
+          <th style="text-align:center">上期持仓</th>
+          <th style="text-align:center">目标持仓</th>
+          <th>操作（T+1 开盘参考）</th>
+        </tr>
+        {trade_plan_rows}
+      </table>
+      <p style="font-size:11px;color:#999;margin-top:12px">
+        注：目标持仓 = 账户总值 × 实际权重 ÷ 收盘价，取整到 {trade_unit_html} 股整数倍。
+        上期持仓为估算值（假设上期按推荐执行），请以实际账户持仓核对后再下单。
+        MarketTimer 当前 risk_factor = {risk_factor:.2%}，实际权重 = 等权 × risk_factor。
+      </p>
+    </div>"""
+
+    action_summary_html = trade_plan_html + f"""
     <div class="section" style="border-left:4px solid #D94040">
       <h2>今日操作清单（T+1 执行参考）</h2>
       <table>
@@ -1208,6 +1530,8 @@ def _build_report_html(
     </div>
   </div>
 
+  {risk_banner_html}
+
   <div class="section">
     <h2>今日推荐持仓（T+1 参考执行）</h2>
     <div class="dist-bar">信号分布: {dist_html}</div>
@@ -1218,15 +1542,16 @@ def _build_report_html(
         <th>排名</th>
         <th>模型打分</th>
         <th>百分位</th>
-        <th>建议权重</th>
+        <th>等权权重</th>
+        <th>实际权重<br><small style="font-weight:normal">×{risk_factor:.2%}</small></th>
         <th>变化</th>
         <th>打分变化</th>
       </tr>
-      {rec_rows if rec_rows else '<tr><td colspan="7" style="text-align:center;color:#999">无推荐标的</td></tr>'}
+      {rec_rows if rec_rows else '<tr><td colspan="8" style="text-align:center;color:#999">无推荐标的</td></tr>'}
     </table>
     <p class="note">
       注：推荐结果基于收盘后模型推理，次日开盘参考执行（T+1）。
-      建议权重为等权分配参考值，实际仓位请结合个人风险偏好调整。
+      实际权重 = 等权权重 × risk_factor（{risk_factor:.2%}），由 MarketTimer 根据当前市场波动自动计算。
       股票存在涨跌停、停牌等情况时可能无法按预期成交。
     </p>
   </div>
@@ -1397,6 +1722,10 @@ def main() -> None:
     weight_method = live_params.get("weight_method", "equal")
     tradable_universe = live_cfg_raw.get("experiment", {}).get("tradable_universe", "csi500")
     provider_uri = live_cfg_raw.get("qlib_init", {}).get("provider_uri", "D:/qlib_data/qlib_data")
+    # 账户配置（用于计算具体调仓手数）
+    account_cfg = live_cfg_raw.get("account", {})
+    account_total: float = float(account_cfg.get("total_value", 300000))
+    account_trade_unit: int = int(account_cfg.get("trade_unit", 100))
 
     # ── qlib 初始化 ────────────────────────────────────────────────
     try:
@@ -1531,10 +1860,26 @@ def main() -> None:
 
     selection = add_stock_names(selection)
 
+    # ── MarketTimer：仓位缩放 ──────────────────────────────────────
+    market_timer_cfg = live_cfg_raw.get("market_timer", {})
+    risk_factor, _timer = compute_risk_factor(market_timer_cfg, predict_date)
+    selection = apply_risk_factor(selection, risk_factor)
+
+    # ── 调仓计划：计算具体买卖手数 ─────────────────────────────────
+    # actual_weight 已含 risk_factor 缩放，此时计算最终操作手数
+    selection = compute_trade_plan(
+        selection=selection,
+        predict_date=predict_date,
+        account_total=account_total,
+        trade_unit=account_trade_unit,
+        prev_selection=prev_selection,
+    )
+
     # ── 持久化 ─────────────────────────────────────────────────────
     output_dir = persist_prediction(
         predict_date, selection, pred_score, model_meta, live_cfg_raw,
         exclusion_log=exclusion_log,
+        risk_factor=risk_factor,
     )
 
     # ── 打印结果摘要 ──────────────────────────────────────────────
@@ -1544,36 +1889,50 @@ def main() -> None:
     drop_df = selection[selection["change"] == "drop_out"]
     reduce_df = selection[selection["change"] == "reduce"]
 
+    # MarketTimer 摘要
+    if risk_factor < 0.99:
+        rf_level = "[!] 高波动减仓" if risk_factor < 0.60 else "[~] 中波动减仓"
+    else:
+        rf_level = "[OK] 低波动满仓"
     print(f"\n{'='*60}")
     print(f"  预测日期: {predict_date}   耗时: {total_sec}s")
+    print(f"  MarketTimer  risk_factor = {risk_factor:.2%}  [{rf_level}]")
+    print(f"  账户总值: {account_total/1e4:.0f}万元")
     print(f"  输出目录: {output_dir}")
-    print(f"  {'─'*50}")
-    print(f"  今日推荐持仓（TopK={topk}，T+1 参考执行）:")
-    print(f"  {'─'*50}")
-    print(f"  {'排名':<6} {'股票代码':<14} {'打分':>10} {'百分位':>8} {'权重':>8} {'变化'}")
-    print(f"  {'─'*50}")
+
+    # ── 明日 T+1 调仓操作计划（核心）───────────────────────────────
+    print(f"\n  {'='*56}")
+    print(f"  明日 T+1 调仓操作计划（参考执行，以实际持仓为准）")
+    print(f"  {'='*56}")
+    print(f"  {'操作':<10} {'股票':<12} {'现价':>7} {'目标':>8} {'持仓':>8} {'操作手数':<22}")
+    print(f"  {'─'*56}")
     for _, row in top_df.iterrows():
-        change_str = {"new_in": "★买入", "hold": "  持有"}.get(row["change"], row["change"])
-        pct_str = f"{row.get('percentile', 0):.1f}%"
-        w_str = f"{float(row['suggested_weight']):.1%}"
-        print(
-            f"  {int(row['rank']):<6} {row['instrument']:<14} "
-            f"{float(row['score']):>10.4f} {pct_str:>8} {w_str:>8} {change_str}"
-        )
-    if not reduce_df.empty:
-        print(f"  {'─'*50}")
-        print(f"  ▷ 考虑调仓（排名调出 TopK，可逐步减仓或观望次日）:")
-        for _, row in reduce_df.iterrows():
-            score_str = f"{float(row['score']):.4f}" if not math.isnan(float(row["score"])) else "—"
-            pct_str = f"{row.get('percentile', 0):.1f}%"
-            print(f"    ▷ {row['instrument']}  今日打分={score_str}  百分位={pct_str}")
-    if not drop_df.empty:
-        print(f"  {'─'*50}")
-        print(f"  ✕ 建议清仓（今日打分跌破 {drop_signal_quantile*100:.0f} 分位，信号明显恶化）:")
-        for _, row in drop_df.iterrows():
-            score_str = f"{float(row['score']):.4f}" if not math.isnan(float(row["score"])) else "—"
-            pct_str = f"{row.get('percentile', 0):.1f}%"
-            print(f"    ✕ {row['instrument']}  今日打分={score_str}  百分位={pct_str}")
+        action = row.get("action_cn", "持有")
+        inst = row["instrument"]
+        px = row.get("close_price", float("nan"))
+        px_str = f"{px:.2f}" if math.isfinite(float(px)) else " —"
+        tsh = int(row.get("target_shares", 0))
+        psh = int(row.get("prev_shares", 0))
+        target_str = f"{tsh}股" if tsh > 0 else "—"
+        prev_str = f"{psh}股" if psh > 0 else "0"
+        print(f"  {action[:10]:<10} {inst:<12} {px_str:>7} {target_str:>8} {prev_str:>8} {action}")
+
+    # 减仓 / 清仓行
+    if not reduce_df.empty or not drop_df.empty:
+        print(f"  {'─'*56}")
+        for _, row in pd.concat([reduce_df, drop_df], ignore_index=True).iterrows():
+            chg = row.get("change", "")
+            prefix = ">> 调仓" if chg == "reduce" else "XX 清仓"
+            inst = row["instrument"]
+            psh = int(row.get("prev_shares", 0))
+            action = row.get("action_cn", "")
+            px = row.get("close_price", float("nan"))
+            px_str = f"{px:.2f}" if math.isfinite(float(px)) else " —"
+            print(f"  {prefix:<10} {inst:<12} {px_str:>7} {'0股':>8} {f'{psh}股' if psh > 0 else '?':>8} {action}")
+
+    print(f"  {'='*56}")
+    print(f"  注：目标持仓 = 账户{account_total/1e4:.0f}万 × 实际权重 / 收盘价，取整到{account_trade_unit}股整数倍")
+    print(f"      上期持仓为估算值（假设上期按推荐执行），请以实际持仓核对")
     print(f"{'='*60}")
     print(f"  查看完整报告: {output_dir / 'report.html'}\n")
 

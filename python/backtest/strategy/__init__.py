@@ -7,7 +7,7 @@
         ↓
     SignalProcessor      （预留：截面 zscore / EWMA 平滑）
         ↓
-    MarketTimer          （预留：vol target / drawdown 熔断）
+    MarketTimer          ✓ 第二阶段实现：GARCH(1,1) / 滚动 STD 目标波动率策略
         ↓
     Selector             ✓ 第一阶段实现：截面 topk + 分位过滤
         ↓
@@ -24,7 +24,7 @@
   - 旧的 TopkDropoutStrategy 路径不动，由配置 strategy.class 切换
 """
 
-from .selector import TopKSelector
+from .selector import TopKSelector, AdaptiveTopKCfg
 from .weighter import (
     Weighter,
     EqualWeighter,
@@ -51,8 +51,24 @@ except ImportError:
     StockFilter = None  # type: ignore[assignment]
     build_stock_filter = None  # type: ignore[assignment]
 
+try:
+    from .market_timer import (
+        MarketTimerBase,
+        NullTimer,
+        RollingVolTimer,
+        GarchVolTimer,
+        build_market_timer,
+    )
+except ImportError:  # pragma: no cover
+    MarketTimerBase = None  # type: ignore[assignment,misc]
+    NullTimer = None  # type: ignore[assignment]
+    RollingVolTimer = None  # type: ignore[assignment]
+    GarchVolTimer = None  # type: ignore[assignment]
+    build_market_timer = None  # type: ignore[assignment]
+
 __all__ = [
     "TopKSelector",
+    "AdaptiveTopKCfg",
     "Weighter",
     "EqualWeighter",
     "ScoreWeighter",
@@ -63,4 +79,9 @@ __all__ = [
     "QuantMLWeightStrategy",
     "StockFilter",
     "build_stock_filter",
+    "MarketTimerBase",
+    "NullTimer",
+    "RollingVolTimer",
+    "GarchVolTimer",
+    "build_market_timer",
 ]

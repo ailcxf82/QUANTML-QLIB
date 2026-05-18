@@ -43,8 +43,10 @@ class StockFilter:
         # {date_str_YYYYMMDD: Set[UPPER_INSTRUMENT_CODE]}
         self._st_index: Dict[str, Set[str]] = {}
         self._consecutive_limit_days = int(consecutive_limit_days)
-        # 涨停缓存：{cache_key: Set[instrument]}
+        # 涨停缓存：{cache_key: Set[instrument]}（旧方案，保留备用）
         self._limit_up_cache: Dict[str, Set[str]] = {}
+        # 收盘价全量缓存（按标的，一次性加载，避免每日重复 D.features 查询）
+        self._close_cache: Dict[str, pd.Series] = {}
 
         if st_csv_path:
             self._load_st_csv(Path(st_csv_path))
@@ -104,6 +106,9 @@ class StockFilter:
     ) -> Set[str]:
         """检测截至 date 前一个交易日已连续涨停的股票。
 
+        性能优化：按标的缓存全量收盘价，每只股票只做一次 D.features 调用。
+        与 QuantMLWeightStrategy._fetch_return_history 相同的优化模式。
+
         Args:
             instruments: 候选股票代码列表
             date:        当前决策日期（T），检测 T-1 及之前的状态
@@ -114,50 +119,53 @@ class StockFilter:
         if not instruments or self._consecutive_limit_days <= 0:
             return set()
 
-        date_str = _to_date8(date)
-        # 用日期 + 前 N 只代码作缓存 key（平衡精度与内存）
-        cache_key = f"{date_str}|{','.join(sorted(str(i) for i in instruments[:20]))}"
-        if cache_key in self._limit_up_cache:
-            return self._limit_up_cache[cache_key]
+        end_dt = pd.Timestamp(date) - pd.Timedelta(days=1)
 
-        result: Set[str] = set()
-        try:
-            from qlib.data import D
-
-            lookback_days = self._consecutive_limit_days * 4 + 15
-            end_dt = pd.Timestamp(date) - pd.Timedelta(days=1)
-            start_dt = end_dt - pd.Timedelta(days=lookback_days)
-
-            features = D.features(
-                list(instruments),
-                fields=["$close"],
-                start_time=start_dt.strftime("%Y-%m-%d"),
-                end_time=end_dt.strftime("%Y-%m-%d"),
-                freq="day",
-            )
-            if features is not None and not features.empty:
-                for inst in features.index.get_level_values("instrument").unique():
+        # 找出尚未缓存的标的，批量一次性加载（far_future 确保拿到全部历史）
+        missing = [i for i in instruments if str(i) not in self._close_cache]
+        if missing:
+            try:
+                from qlib.data import D
+                df = D.features(
+                    [str(m) for m in missing],
+                    fields=["$close"],
+                    start_time="2015-01-01",
+                    end_time="2099-01-01",
+                    freq="day",
+                )
+                if df is not None and not df.empty:
                     try:
-                        close = (
-                            features.xs(inst, level="instrument")["$close"]
-                            .sort_index()
-                            .dropna()
-                        )
-                        if len(close) < self._consecutive_limit_days + 1:
-                            continue
-                        rets = close.pct_change().dropna()
-                        recent = rets.iloc[-self._consecutive_limit_days :]
-                        if (recent >= 0.095).all():
-                            result.add(str(inst))
+                        close_all = df["$close"].unstack(level=0).sort_index()
                     except Exception:
-                        continue
-        except Exception as exc:
-            _logger.debug("连续涨停检测跳过 (%s)", exc)
+                        close_all = pd.DataFrame()
+                    for inst in missing:
+                        key = str(inst)
+                        if key in close_all.columns:
+                            self._close_cache[key] = close_all[key].dropna()
+                        else:
+                            self._close_cache[key] = pd.Series(dtype=float)
+            except Exception as exc:
+                _logger.debug("连续涨停检测加载失败 (%s)", exc)
+                for inst in missing:
+                    self._close_cache.setdefault(str(inst), pd.Series(dtype=float))
 
-        # 写入缓存，超限时删除最旧条目
-        self._limit_up_cache[cache_key] = result
-        if len(self._limit_up_cache) > 500:
-            del self._limit_up_cache[next(iter(self._limit_up_cache))]
+        # 从缓存切片，判断连续涨停
+        result: Set[str] = set()
+        lookback_need = self._consecutive_limit_days + 2  # 需要 N+2 个交易日
+        for inst in instruments:
+            cached = self._close_cache.get(str(inst))
+            if cached is None or cached.empty:
+                continue
+            close = cached[cached.index <= end_dt].dropna()
+            if len(close) < lookback_need:
+                continue
+            try:
+                rets = close.pct_change(fill_method=None).dropna()
+                recent = rets.iloc[-self._consecutive_limit_days:]
+                if len(recent) >= self._consecutive_limit_days and (recent >= 0.095).all():
+                    result.add(str(inst))
+            except Exception:
+                continue
 
         return result
 

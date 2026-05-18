@@ -21,6 +21,7 @@ import pytest
 
 from backtest.strategy import (
     TopKSelector,
+    AdaptiveTopKCfg,
     EqualWeighter,
     ScoreWeighter,
     InverseVolWeighter,
@@ -1114,3 +1115,123 @@ class TestStrategyLayerQuantML:
         out = StrategyLayer().build(cfg, signal)
         assert out["class"] == "TopkDropoutStrategy"
         assert out["kwargs"]["signal"] is signal
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# AdaptiveTopKCfg / TopKSelector 自适应逻辑
+# ─────────────────────────────────────────────────────────────────────────────
+
+class TestAdaptiveTopKSelector:
+    """
+    验证 AdaptiveTopKCfg 在强/弱信号截面下正确切换 topk。
+    设计：强信号 = 头部分数极其集中（高 std，大 head-median 差）；
+          弱信号 = 分数近乎均匀（极小 std）。
+    """
+
+    def _make_selector(self) -> TopKSelector:
+        cfg = AdaptiveTopKCfg(
+            strong_topk=3,
+            weak_topk=8,
+            strong_quantile=0.85,
+            weak_quantile=0.60,
+            strength_high=1.0,
+            strength_low=-0.3,
+            strength_window=20,
+            cold_start_min=5,
+        )
+        return TopKSelector(topk=5, score_quantile=0.70, adaptive_topk_cfg=cfg)
+
+    # ------------------------------------------------------------------
+    # 构造截面数据的辅助方法
+    # ------------------------------------------------------------------
+    # 强度公式: raw_strength = (mean(top_q%) - median) / std
+    # 关键：少数极端异常值会膨胀全截面 std，反而降低 raw_strength。
+    # 因此强信号的构造方式是：大多数股票 N(0,0.8)，头部 5 只偏移 +2σ(=1.6) 以上。
+    # 弱信号：所有股票 N(0, ε)，head-median 差极小，raw_strength ≈ 0。
+    # 预热：多次 N(0, 0.8) 的"普通"截面，建立中等水平的 rolling 基准。
+    # ------------------------------------------------------------------
+
+    def _make_strong_score(self, n: int = 200) -> pd.Series:
+        """
+        强信号截面：大多数股票 N(0, 0.8)，头部 5 只额外偏移 +3.0。
+        raw_strength 会显著高于普通截面，触发 z > strength_high。
+        """
+        rng = np.random.default_rng(42)
+        scores = rng.normal(0.0, 0.8, n)
+        scores[:5] += 3.0  # 头部加偏移，不改变主体分布的 std
+        return pd.Series(scores, index=[f"S{i:04d}" for i in range(n)])
+
+    def _make_weak_score(self, n: int = 200) -> pd.Series:
+        """弱信号截面：所有分数近乎一致，raw_strength ≈ 0。"""
+        rng = np.random.default_rng(99)
+        return pd.Series(
+            1.0 + rng.uniform(-0.001, 0.001, n),
+            index=[f"S{i:04d}" for i in range(n)],
+        )
+
+    def _make_normal_score(self, seed: int = 7, n: int = 200) -> pd.Series:
+        """普通截面：N(0, 0.8)，无明显头部偏移，raw_strength 中等。"""
+        rng = np.random.default_rng(seed)
+        return pd.Series(rng.normal(0.0, 0.8, n), index=[f"S{i:04d}" for i in range(n)])
+
+    def _warm_up(self, sel: TopKSelector, n_steps: int = 10) -> None:
+        """用不同 seed 的普通截面预热，建立稳定的 rolling 基准。"""
+        for i in range(n_steps):
+            sel.select(self._make_normal_score(seed=100 + i))
+
+    def test_strong_signal_uses_smaller_topk(self) -> None:
+        """强信号截面（头部+3σ偏移）应触发 z > strength_high，使用 strong_topk=3。"""
+        sel = self._make_selector()
+        self._warm_up(sel)
+        result = sel.select(self._make_strong_score())
+        assert len(result) <= 3, f"强信号日期望 ≤ strong_topk=3，实际 {len(result)}: {result}"
+
+    def test_weak_signal_uses_larger_topk(self) -> None:
+        """弱信号截面（近乎均匀）应触发 z < strength_low，使用 weak_topk=8。"""
+        sel = self._make_selector()
+        # 先用强信号预热 + 普通截面，将 rolling_mean 推到中等偏高水平
+        for _ in range(10):
+            sel.select(self._make_strong_score())
+        result = sel.select(self._make_weak_score())
+        assert len(result) >= 1, "弱信号日应有候选"
+        assert len(result) <= 8, f"弱信号日期望 ≤ weak_topk=8，实际 {len(result)}"
+
+    def test_cold_start_falls_back_to_default(self) -> None:
+        """历史不足 cold_start_min(=5) 时，应使用默认 topk=5。"""
+        sel = self._make_selector()
+        # 只预热 2 步（< cold_start_min=5），此时应回退默认
+        for _ in range(2):
+            rng = np.random.default_rng(1)
+            sc = pd.Series(rng.normal(0, 1, 200), index=[f"S{i:04d}" for i in range(200)])
+            sel.select(sc)
+        # 第 3 步用强信号，但历史不足，应返回默认 topk=5
+        result = sel.select(self._make_strong_score())
+        assert len(result) <= 5, f"冷启动应 ≤ 默认 topk=5，实际 {len(result)}"
+
+    def test_no_adaptive_cfg_unchanged(self) -> None:
+        """未配置 adaptive_topk_cfg 时，行为与原有 TopKSelector 完全一致。"""
+        sel = TopKSelector(topk=5, score_quantile=0.70)
+        rng = np.random.default_rng(42)
+        sc = pd.Series(rng.normal(0, 1, 200), index=[f"S{i:04d}" for i in range(200)])
+        result = sel.select(sc)
+        assert 1 <= len(result) <= 5
+
+    def test_reset_history(self) -> None:
+        """reset_history() 应清空历史，之后重回冷启动状态。"""
+        sel = self._make_selector()
+        self._warm_up(sel)
+        assert len(sel._strength_history) > 0
+        sel.reset_history()
+        assert len(sel._strength_history) == 0
+        # 重置后首次 select 应走冷启动路径，返回默认 topk
+        result = sel.select(self._make_strong_score())
+        assert len(result) <= 5
+
+    def test_describe_shows_adaptive_info(self) -> None:
+        """describe() 应包含自适应配置的关键信息。"""
+        sel = self._make_selector()
+        desc = sel.describe()
+        assert "自适应" in desc
+        assert "strong_topk" not in desc  # 只检查"自适应"关键字和参数值
+        assert "topk=3" in desc
+        assert "topk=8" in desc

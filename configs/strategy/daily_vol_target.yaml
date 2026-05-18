@@ -1,0 +1,119 @@
+# 日频交易 + GARCH 目标波动率策略（MarketTimer）
+# =========================================================
+# 设计目标：与基线 TopkDropoutStrategy 订单量级相近（~700-1000 笔），
+#           同时通过 GARCH 市场定时器获得高波动期下行保护。
+#
+# 核心公式：
+#   risk_factor = clip(σ_target / (√252 · σ̂_{t+1|GARCH}), min_risk, max_risk)
+#   滞后过滤：|rf_new - rf_applied| < min_change(5%) 时忽略，不触发微调订单
+#
+# 订单量对比（测试期 ~340 天）：
+#   基线 TopkDropoutStrategy（n_drop=1）：~640 笔
+#   本配置（等权 + rebalance_freq=5 + min_change=5%）：~700-1000 笔
+#
+# 使用方式：
+#   python python/run_experiment.py --model lgbm --freq daily_retrain \
+#       --strategy-cfg configs/strategy/daily_vol_target.yaml
+
+strategy:
+  class: "QuantMLWeightStrategy"
+  module_path: "backtest.strategy"
+  kwargs:
+    # ── T2-1 调整：topk 5→8，释放 RiskParity/AdaptiveTopK 的真实效果 ──────
+    # T1 复盘结论：topk=5 下 RiskParity 协方差矩阵自由度不足（60/5=12）、
+    # AdaptiveTopK 弱信号日 topk=8 的仓位 < trade_unit 被截断。
+    # topk=8：每票仓位 = 30万×0.5/8 = 1.875万，20元/股 = 937股 >> 100股（安全）
+    topk: 8
+    # score_quantile 调严（0.70→0.82）补偿 topk 增大带来的候选宽松度
+    score_quantile: 0.82
+
+    # ── 信号强度自适应 TopK（T1-C，参数随 topk=8 同步调整）────────────────
+    # 强信号日：topk=5（仍比默认少，集中持仓）
+    # 弱信号日：topk=12（更大分散，有足够仓位避免 trade_unit 截断）
+    adaptive_topk_cfg:
+      strong_topk: 5
+      weak_topk: 12
+      strong_quantile: 0.90
+      weak_quantile: 0.72
+      strength_high: 1.0
+      strength_low: -0.3
+      strength_window: 20
+      cold_start_min: 5
+
+    rebalance_freq: 5
+    vol_lookback: 60
+    trade_unit: 100
+
+    # n_drop=2：topk=8 下每步换出 2 只（占 25%），比 n_drop=1 更灵活
+    n_drop: 2
+
+    # risk_parity：T1-B 引入，topk=8 下协方差自由度 60/8=7.5×，估计更稳
+    weighter_cfg:
+      type: "risk_parity"
+      kwargs:
+        lookback: 60
+        shrink: ~
+
+    risk_cfg:
+      # max_weight 从 0.30 下调至 0.15（≈ 1/topk × 1.2），防单票过度集中
+      max_weight: 0.15
+      sector_max_weight: 1.0
+      max_turnover: 0.50
+
+    # exit_rules 注意：不启用 exit_rules！
+    # 原因：exit_rules 触发时 renormalize_target 会把剩余持仓从 20% 升到 25%，
+    # Qlib 为此给每只持仓股生成加仓订单，1次止损 = 5个订单，严重放大订单量。
+    # 基线 TopkDropoutStrategy 本身没有 exit_rules，GARCH 本身已提供下行保护。
+    # 如需止损，请使用 daily_sl_tp.yaml 而非本配置。
+
+    stock_filter_cfg:
+      st_csv_path: "D:/qlib_data/qlib_data/is_st.csv"
+      consecutive_limit_days: 1
+      exclude_st: true
+      exclude_limit_up: true
+
+    # ── MarketTimer 目标波动率策略 ──────────────────────────────────────────
+    # type: garch   → GARCH(1,1) + Student-t（主推）
+    # type: rolling → 滚动标准差（稳健替代）
+    # type: null    → 关闭定时器（基线对比，等同 TopkDropoutStrategy）
+    # ─────────────────────────────────────────────────────────────────────────
+    market_timer_cfg:
+      type: "garch"
+
+      # 基准指数：CSI500（A 股 Qlib 数据集代码为 000905.SZ）
+      benchmark: "000905.SZ"
+
+      # ── target_vol 选择指南 ──────────────────────────────────────────────
+      # CSI500 历史年化波动率：低波动期 15-20%，常规期 20-30%，高波动期 30-60%
+      #   0.25 → 轻度风控（推荐）：仅高波动期（>25%）才减仓，约 60% 时间满仓
+      #   0.20 → 中度风控：约 40% 时间满仓，高波动期减至 40-50%
+      #   0.15 → 强力风控：绝大多数时间 30-50% 仓位，大幅压低收益
+      # ──────────────────────────────────────────────────────────────────────
+      target_vol: 0.25
+
+      # 仓位下限：
+      # ⚠️ 不建议低于 0.50！min_risk 太低时每只股票仓位变小，等权重漂移修正
+      #   所需调整量不足 100 股（trade_unit 最小手数），被截断为 0 → 策略"冻结"
+      # 计算：account=30万, topk=5, min_risk=0.50
+      #   每只仓位 = 30万×0.50/5 = 3万元，以 20元/股计 = 1500股 > 100股（安全）
+      # min_risk=0.30时：30万×0.30/5 = 1.8万元 / 20元 = 900股，漂移修正可能 < 100股 → 冻结
+      min_risk: 0.50
+
+      # 仓位上限：不加杠杆
+      max_risk: 1.0
+
+      # GARCH 重拟合间隔（交易日）：5 = 每周重拟合
+      refit_freq: 5
+
+      # 冷启动保护：历史不足 120 个交易日时返回 1.0（满仓），避免冷启动误判
+      min_obs: 120
+
+      # 历史数据起始
+      hist_start: "2018-01-01"
+
+      # ── 关键参数：risk_factor 变化最小阈值（防微调订单）─────────────────
+      # 搭配 rebalance_freq=5（周频）使用：每周仅检查一次 risk_factor
+      # 设为 0.10（10%）：只有 risk_factor 变化超过 10% 绝对值才触发仓位调整
+      # 例：0.80 → 0.70 → 触发  |  0.80 → 0.85 → 不触发（max_risk=1.0 截断）
+      # 取值建议：0.05~0.15（搭配 rebalance_freq=5 时可以更大些）
+      min_change: 0.10

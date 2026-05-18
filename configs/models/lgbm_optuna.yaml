@@ -1,0 +1,51 @@
+# 由 optuna_lgbm.py 搜索结果（Trial 4）自动生成
+# best WF OOS Sharpe = 7.154（50 trials 中最优，已在 trial 4 确认后停止）
+#
+# Trial 4 参数 vs 基线 lgbm.yaml：
+#   num_leaves:         31 → 18    （更浅的树，减少过拟合）
+#   learning_rate:     0.012 → 0.04445  （更高学习率，配合更少叶子）
+#   min_child_samples: 200 → 485   （更大叶子样本下限，更保守分裂）
+#   feature_fraction:  0.85 → 0.864（基本持平）
+#   bagging_fraction:  0.70 → 0.637（略低行采样）
+#   reg_lambda:        2.0 → 0.670 （更低 L2，与 extra_trees 配合）
+#   extra_trees:       true（保持）
+#   max_depth: 不变（5），feature_fraction_bynode 不变（0.85）
+#
+# 核心规律：浅树+大 min_child_samples+较高 lr → 正则化更强，防止在噪声信号上过拟合
+
+model_meta:
+  name: "lgbm_optuna"
+  dataset_type: "flat"
+  freq_key: "1day"
+  feature_groups: ~
+  combined_factors_json: "configs/combined_factors_df.json"
+
+model:
+  class: "LGBModel"
+  module_path: "qlib.contrib.model.gbdt"
+  kwargs:
+    loss: "mse"
+    early_stopping_rounds: 200
+    num_boost_round: 5000
+    # ── Optuna Trial 4 最优超参 ──────────────────────────────────
+    learning_rate: 0.04445
+    num_leaves: 18
+    min_child_samples: 485
+    feature_fraction: 0.8638
+    bagging_fraction: 0.6371
+    reg_lambda: 0.6700
+    extra_trees: true
+    # ── 保持基线不变的参数 ────────────────────────────────────────
+    max_depth: 5
+    min_split_gain: 0.0
+    feature_fraction_bynode: 0.85
+    bagging_freq: 1
+    reg_alpha: 0.3
+    path_smooth: 2.0
+    seed: 42
+    feature_fraction_seed: 42
+    bagging_seed: 42
+    data_random_seed: 42
+    deterministic: true
+    force_col_wise: true
+    num_threads: -1

@@ -22,6 +22,11 @@ experiment:
   seed: 42
   tradable_universe: "csi500"  # 实盘与回测口径一致：只在 csi500 中选股
 
+# 账户配置（用于计算具体调仓手数）
+account:
+  total_value: 200000          # 总资金（元），用于计算 target_shares = actual_weight × total_value / price
+  trade_unit: 100              # A 股最小交易单位（1 手 = 100 股）
+
 # 实盘选股参数
 live:
   topk: 5                      # 每日最多推荐 N 只股票
@@ -49,3 +54,17 @@ model_store:
 tracking:
   predictions_dir: "predictions"   # 预测结果保存目录（相对仓库根）
   history_days: 20                 # report.html 中展示最近 N 日预测记录
+
+# MarketTimer：目标波动率仓位缩放（每日预测后自动计算并注入 actual_weight）
+# risk_factor = clip(σ_target / (√252 · σ̂_{t+1|GARCH}), min_risk, max_risk)
+# 高波动期自动减仓（如 40% 年化波动 → risk_factor ≈ 0.38），低波动期满仓。
+market_timer:
+  enabled: true                  # false = 关闭，actual_weight = suggested_weight
+  type: "garch"                  # garch（主推）| rolling（稳健）| null（满仓基线）
+  benchmark: "000905.SZ"         # CSI500，与 tradable_universe 对齐
+  target_vol: 0.25               # 年化目标波动率 25%（轻度风控，仅高波动期才减仓）
+  min_risk: 0.50                 # 最低仓位 50%（低于此值每只持仓不足 100 股，trade_unit 截断→冻结）
+  max_risk: 1.0                  # 不加杠杆
+  refit_freq: 5                  # 每 5 个交易日重拟合 GARCH（每周一次）
+  min_obs: 120                   # 冷启动保护：历史不足 120 日时退化为满仓
+  hist_start: "2018-01-01"       # 用于加载 CSI500 历史收益率的起始日期

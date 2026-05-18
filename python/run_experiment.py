@@ -111,6 +111,9 @@ _MODEL_ALIASES: Dict[str, str] = {
     # 实现产物完全隔离（latest_lgbm_lab_<name>_daily.pkl）。
     "lgbm_lab": "lgbm_lab",
     "lgbmlab": "lgbm_lab",
+    # lgbm_optuna: Optuna 超参搜索结果（Trial 4，WF Sharpe 7.15）
+    "lgbm_optuna": "lgbm_optuna",
+    "lgbmoptuna": "lgbm_optuna",
     # mlp
     "mlp": "mlp",
     "dnn": "mlp",

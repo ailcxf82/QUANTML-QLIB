@@ -37,7 +37,7 @@ except ImportError:  # 测试环境无 qlib 时降级，单测仅用 _compute_ta
 
 _logger = logging.getLogger("QuantMLWeightStrategy")
 
-from .selector import TopKSelector
+from .selector import TopKSelector, AdaptiveTopKCfg
 from .weighter import build_weighter
 from .constraints import RiskConstraints
 from .exit_rules import (
@@ -47,6 +47,7 @@ from .exit_rules import (
     strip_exited_symbols,
 )
 from .stock_filter import StockFilter, build_stock_filter
+from .market_timer import MarketTimerBase, build_market_timer
 
 
 class QuantMLWeightStrategy(WeightStrategyBase):
@@ -56,6 +57,9 @@ class QuantMLWeightStrategy(WeightStrategyBase):
     Args（kwargs）:
         topk: 候选股票数量（默认 25）
         score_quantile: 截面分位过滤阈值（默认 0.0 = 不过滤；推荐 0.7）
+        adaptive_topk_cfg: 信号强度自适应 topk 配置（dict or None）；
+            可选键：strong_topk / weak_topk / strong_quantile / weak_quantile /
+            strength_high / strength_low / strength_window / cold_start_min
         rebalance_freq: 调仓周期（每 N 个 trade_step 重算一次权重，默认 10 = 双周）
         vol_lookback: 计算波动率/协方差的回看天数（默认 60 = 三个月）
         weighter_cfg: dict {"type": "inverse_vol", "kwargs": {...}}
@@ -70,6 +74,15 @@ class QuantMLWeightStrategy(WeightStrategyBase):
             consecutive_limit_days (int): 连续涨停天数阈值（0=不过滤）
             exclude_st (bool): 是否过滤 ST，默认 True
             exclude_limit_up (bool): 是否过滤连续涨停，默认 True
+        market_timer_cfg: dict | None 市场波动定时器配置（目标波动率策略），可选键：
+            type (str): garch | rolling | null（默认 null）
+            benchmark (str): 基准指数代码，如 "SH000905"（CSI500）
+            target_vol (float): 年化目标波动率，如 0.15（15%）
+            min_risk (float): 仓位缩放下限，如 0.30（最低持仓 30%）
+            max_risk (float): 仓位缩放上限，默认 1.0（不加杠杆）
+            refit_freq (int): GARCH 重拟合间隔（交易日数，仅 garch 有效）
+            min_obs (int): 冷启动期（观测不足时返回 1.0）
+            hist_start (str): 历史数据起始日期
         其它 kwargs 传给父类（signal/trade_exchange/risk_degree 等）
     """
 
@@ -78,6 +91,7 @@ class QuantMLWeightStrategy(WeightStrategyBase):
         *,
         topk: int = 25,
         score_quantile: float = 0.0,
+        adaptive_topk_cfg: Optional[Dict[str, Any]] = None,
         rebalance_freq: int = 10,
         vol_lookback: int = 60,
         weighter_cfg: Optional[Dict[str, Any]] = None,
@@ -86,6 +100,7 @@ class QuantMLWeightStrategy(WeightStrategyBase):
         exit_rules: Optional[Dict[str, Any]] = None,
         stock_filter_cfg: Optional[Dict[str, Any]] = None,
         trade_unit: int = 100,
+        market_timer_cfg: Optional[Dict[str, Any]] = None,
         **kwargs: Any,
     ) -> None:
         # 校验调仓周期与回看
@@ -107,7 +122,16 @@ class QuantMLWeightStrategy(WeightStrategyBase):
             super().__init__(**kwargs)
 
         # 组装管线组件
-        self._selector = TopKSelector(topk=topk, score_quantile=score_quantile)
+        _adaptive_cfg: Optional[AdaptiveTopKCfg] = (
+            AdaptiveTopKCfg(**adaptive_topk_cfg)
+            if adaptive_topk_cfg and isinstance(adaptive_topk_cfg, dict)
+            else None
+        )
+        self._selector = TopKSelector(
+            topk=topk,
+            score_quantile=score_quantile,
+            adaptive_topk_cfg=_adaptive_cfg,
+        )
         self._weighter = build_weighter(
             weighter_cfg or {"type": "inverse_vol", "kwargs": {}}
         )
@@ -143,6 +167,97 @@ class QuantMLWeightStrategy(WeightStrategyBase):
         self._exit_events: List[Dict[str, Any]] = []
         # 由 generate_trade_decision 在调用父类前设置，供 generate_target_weight_position 分支
         self._pending_model_rebalance: bool = True
+
+        # 收益率历史缓存（按标的存储全量收盘价，避免每次调仓都重新拉取 Qlib 数据）
+        # 设计：每只标的只加载一次（end_time=far_future），后续 _fetch_return_history 直接切片
+        # 无前视风险：_fetch_return_history 内部严格截止 end_time_exclusive - 1day
+        self._close_price_cache: Dict[str, pd.Series] = {}
+
+        # 市场波动定时器（目标波动率策略，末端仓位缩放）
+        self._market_timer: Optional[MarketTimerBase] = build_market_timer(
+            market_timer_cfg
+        )
+        # risk_factor 滞后阈值：只有变化幅度超过此值才触发仓位调整，防止 GARCH 每日
+        # 小幅波动产生大量无效微调订单。取 market_timer_cfg 中的 min_change 参数
+        # （绝对值，如 0.05 = 5%）。0.0 表示每日都应用（不过滤）。
+        self._rf_min_change: float = (
+            float(market_timer_cfg.get("min_change", 0.05))
+            if market_timer_cfg else 0.0
+        )
+        self._applied_risk_factor: float = 1.0  # 上次实际生效的 risk_factor
+
+    # ─────────────────────────────────────────────────────────────────────
+    # 批量预加载（供 BacktestEngine 在回测启动前调用）
+    # ─────────────────────────────────────────────────────────────────────
+
+    def preload_instruments(self, pred_score: pd.Series) -> None:
+        """
+        在 Qlib 回测循环启动前，一次性批量加载全部候选标的的历史收盘价。
+
+        动机：_fetch_return_history 与 StockFilter.get_limit_up_set 均需要
+        D.features 调用。若不提前加载，每出现一只新股票就触发一次独立的 D.features
+        调用（7-14 秒/次），340 天回测中出现 100+ 只股票 = 700-1400 秒额外开销。
+        批量预加载将所有 D.features 调用合并为 1 次，消除回测中的反复磁盘读取。
+
+        Args:
+            pred_score: 完整预测信号（MultiIndex: datetime × instrument）
+
+        副作用：
+            - 填充 self._close_price_cache（供 _fetch_return_history 使用）
+            - 填充 self._stock_filter._close_cache（供 StockFilter 使用）
+        """
+        try:
+            from qlib.data import D
+        except ImportError:
+            return
+
+        if isinstance(pred_score.index, pd.MultiIndex):
+            all_insts = list(pred_score.index.get_level_values("instrument").unique())
+        else:
+            _logger.debug("[preload] pred_score 索引非 MultiIndex，跳过预加载")
+            return
+
+        if not all_insts:
+            return
+
+        _logger.info("[preload] 批量预加载 %d 个标的收盘价历史（一次性 D.features）...", len(all_insts))
+        try:
+            # 同时加载复权价（InverseVolWeighter）和原始价（StockFilter 涨停检测）
+            df = D.features(
+                all_insts,
+                fields=["$close_qfq", "$close"],
+                start_time="2015-01-01",
+                end_time="2099-01-01",
+                freq="day",
+            )
+            if df is None or df.empty:
+                _logger.warning("[preload] 加载结果为空，跳过预加载")
+                return
+
+            close_qfq_all = df["$close_qfq"].unstack(level=0).sort_index() if "$close_qfq" in df.columns else pd.DataFrame()
+            close_all = df["$close"].unstack(level=0).sort_index() if "$close" in df.columns else pd.DataFrame()
+
+            loaded_n = 0
+            for inst in all_insts:
+                # 复权价 → _fetch_return_history 缓存
+                if inst not in self._close_price_cache:
+                    if not close_qfq_all.empty and inst in close_qfq_all.columns:
+                        self._close_price_cache[inst] = close_qfq_all[inst].dropna()
+                    else:
+                        self._close_price_cache[inst] = pd.Series(dtype=float)
+                # 原始价 → StockFilter 缓存
+                if self._stock_filter is not None and inst not in self._stock_filter._close_cache:
+                    if not close_all.empty and inst in close_all.columns:
+                        self._stock_filter._close_cache[inst] = close_all[inst].dropna()
+                    else:
+                        self._stock_filter._close_cache[inst] = pd.Series(dtype=float)
+                loaded_n += 1
+
+            _logger.info("[preload] 完成：%d 个标的 close_qfq 已缓存，%d 个 close 已缓存",
+                        sum(1 for v in self._close_price_cache.values() if not v.empty),
+                        sum(1 for v in (self._stock_filter._close_cache.values() if self._stock_filter else [])))
+        except Exception as exc:
+            _logger.warning("[preload] 批量加载失败（%s），回测中将按需加载（较慢）", exc)
 
     # ─────────────────────────────────────────────────────────────────────
     # Qlib 入口
@@ -305,6 +420,24 @@ class QuantMLWeightStrategy(WeightStrategyBase):
             if code not in target:
                 self._entry_ref.pop(code, None)
                 self._peak_ref.pop(code, None)
+
+        # MarketTimer：目标波动率仓位缩放（在 renormalize 之后，保持相对权重结构不变）
+        # 滞后过滤：GARCH 每日微小波动（< rf_min_change）复用上次值，不触发微调订单
+        if self._market_timer is not None and target:
+            rf_new = self._market_timer.get_risk_factor(trade_start_time)
+            if abs(rf_new - self._applied_risk_factor) >= self._rf_min_change:
+                self._applied_risk_factor = rf_new
+                _logger.debug(
+                    "[MarketTimer] %s risk_factor 更新: %.4f → %.4f",
+                    trade_start_time, rf_new, self._applied_risk_factor,
+                )
+            rf = self._applied_risk_factor
+            if rf < 1.0 - 1e-6:
+                target = {k: v * rf for k, v in target.items()}
+                _logger.debug(
+                    "[MarketTimer] %s 应用 risk_factor=%.4f（%.1f%%仓位）",
+                    trade_start_time, rf, rf * 100,
+                )
 
         self._last_target_weights = dict(target)
         return target
@@ -525,10 +658,14 @@ class QuantMLWeightStrategy(WeightStrategyBase):
         """
         拉取候选股票最近 vol_lookback 个交易日的日收益率序列。
 
+        性能优化：按标的缓存全量收盘价，每只股票只做一次 D.features 调用。
+        在长回测（数百日 × 日频调仓）下可将 Qlib 查询次数从 O(T) 降至 O(K)
+        （T=交易日数，K=出现过的不同标的数量）。
+
         关键合规：
           - end_time_exclusive 严格 *不* 包含在内（防止读未来）
-          - 拉取窗口为 [end - 2×lookback 自然日, end - 1 day]，
-            扩 2x 是为了过滤 NaN/停牌后仍能拿到 lookback 个有效日
+          - 即使缓存包含未来价格数据，切片也只取 end_time_exclusive - 1day 之前的数据
+          - 无前视风险：切片逻辑与原来完全一致
 
         Returns:
             DataFrame, index=DatetimeIndex（升序），columns=candidates，value=日收益率
@@ -539,35 +676,59 @@ class QuantMLWeightStrategy(WeightStrategyBase):
         except ImportError:
             return pd.DataFrame()
 
-        # end 之前一天为窗口右界，避免泄漏
+        # end 之前一天为窗口右界（无前视）
         end_dt = pd.Timestamp(end_time_exclusive) - pd.Timedelta(days=1)
-        # 自然日缓冲：至少 2 倍 lookback + 周末/节假日冗余
+
+        # 找出尚未缓存的标的，批量加载
+        missing = [c for c in candidates if c not in self._close_price_cache]
+        if missing:
+            # 使用远期 end_time 一次性加载所有历史，避免每天重复查询
+            # Qlib 只返回实际存在的数据，不会引入未来数据
+            far_start = pd.Timestamp("2015-01-01")  # 足够早，覆盖所有 lookback
+            far_future = pd.Timestamp("2099-01-01")
+            try:
+                df = D.features(
+                    instruments=missing,
+                    fields=["$close_qfq"],
+                    start_time=far_start,
+                    end_time=far_future,
+                    freq="day",
+                )
+                if df is not None and not df.empty:
+                    try:
+                        close_all = df["$close_qfq"].unstack(level=0).sort_index()
+                    except Exception:
+                        close_all = pd.DataFrame()
+                    for inst in missing:
+                        if inst in close_all.columns:
+                            self._close_price_cache[inst] = close_all[inst].dropna()
+                        else:
+                            # 标的无数据：缓存空 Series 避免重复查询
+                            self._close_price_cache[inst] = pd.Series(dtype=float)
+            except Exception:
+                # 加载失败：所有 missing 标的缓存空 Series
+                for inst in missing:
+                    if inst not in self._close_price_cache:
+                        self._close_price_cache[inst] = pd.Series(dtype=float)
+
+        # 从缓存中切片（严格截止 end_dt，无前视）
+        frames: Dict[str, pd.Series] = {}
+        # 窗口起始（自然日缓冲，确保有足够 lookback 个交易日）
         start_dt = end_dt - pd.Timedelta(days=int(self.vol_lookback * 2 + 30))
+        for inst in candidates:
+            cached = self._close_price_cache.get(inst)
+            if cached is None or cached.empty:
+                continue
+            sliced = cached[(cached.index >= start_dt) & (cached.index <= end_dt)]
+            if not sliced.empty:
+                frames[inst] = sliced
 
-        try:
-            df = D.features(
-                instruments=list(candidates),
-                fields=["$close_qfq"],
-                start_time=start_dt,
-                end_time=end_dt,
-                freq="day",
-            )
-        except Exception:
+        if not frames:
             return pd.DataFrame()
 
-        if df is None or df.empty:
-            return pd.DataFrame()
-
-        # qlib 返回 MultiIndex (instrument, datetime)，列为 ['$close_qfq']
-        try:
-            close = df["$close_qfq"].unstack(level=0)
-        except Exception:
-            return pd.DataFrame()
-
-        close = close.sort_index()
-        # 日收益率 = pct_change（显式 fill_method=None 抑制 pandas FutureWarning），dropna 第一行
+        close = pd.DataFrame(frames).sort_index()
+        # 日收益率（显式 fill_method=None 抑制 FutureWarning）
         rets = close.pct_change(fill_method=None).iloc[1:]
-        # 仅保留候选；缺失列用 NaN 占位（Weighter 内部会兜底）
         rets = rets.reindex(columns=candidates)
         return rets
 
@@ -602,6 +763,11 @@ class QuantMLWeightStrategy(WeightStrategyBase):
             if self._stock_filter is not None
             else "off"
         )
+        timer_desc = (
+            self._market_timer.describe()
+            if self._market_timer is not None
+            else "off"
+        )
         return (
             f"QuantMLWeightStrategy(topk={self.topk}, "
             f"score_q={self.score_quantile:.2f}, "
@@ -616,5 +782,6 @@ class QuantMLWeightStrategy(WeightStrategyBase):
             f"    ExitRules   : enabled={self._exit_cfg.is_enabled()} "
             f"(sl={self._exit_cfg.stop_loss_pct}, "
             f"tp={self._exit_cfg.take_profit_pct}, "
-            f"trail={self._exit_cfg.trailing_stop_pct})"
+            f"trail={self._exit_cfg.trailing_stop_pct})\n"
+            f"    MarketTimer : {timer_desc}"
         )

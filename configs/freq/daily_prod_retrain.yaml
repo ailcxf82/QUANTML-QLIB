@@ -44,7 +44,7 @@ backtest:
   exchange_kwargs:
     freq: "day"
     limit_threshold: 0.095
-    deal_price: "close"
+    deal_price: "$close_qfq"
     open_cost: 0.0025
     close_cost: 0.0035
     min_cost: 5

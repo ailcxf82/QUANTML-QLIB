@@ -135,6 +135,15 @@ class BacktestEngine:
         except Exception:
             strategy_obj = None  # 兼容性兜底；qlib_backtest 仍可消费 dict
 
+        # QuantMLWeightStrategy：回测启动前批量预加载所有标的收盘价，
+        # 消除回测循环中反复触发 D.features 的性能瓶颈
+        if strategy_obj is not None and hasattr(strategy_obj, "preload_instruments"):
+            try:
+                strategy_obj.preload_instruments(pred_score)
+            except Exception as _pre_exc:
+                import warnings
+                warnings.warn(f"preload_instruments 失败（{_pre_exc}），回测将按需加载（较慢）")
+
         # ──────────────────────────────────────────────────────────────────
         # [3] 执行层：构建执行器（日频/分钟频）
         # ──────────────────────────────────────────────────────────────────

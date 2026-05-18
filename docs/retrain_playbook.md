@@ -248,7 +248,7 @@ Get-Item D:\qlib_data\qlib_data\instruments\csi500.txt
 ```powershell
 # Step 1（可选但推荐）：先做 LIVE 数据指纹快照，便于事后追溯
 python scripts/check_qlib_data_fingerprint.py snapshot `
-  --label daily_$(Get-Date -Format 20260514)
+  --label daily_$(Get-Date -Format 20260517)
 
 # Step 2：用上线模型 + LIVE 数据生成今日 TopK 选股
 python python/predict_live.py --model lgbm --freq daily --mode predict-only

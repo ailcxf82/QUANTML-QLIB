@@ -11,6 +11,7 @@ PyYAML==6.0.3
 lightgbm==4.6.0
 scikit-learn==1.8.0
 scipy==1.17.1
+arch>=7.0
 
 # 深度学习（可选，仅 MLP/LSTM/GRU/Transformer 模型需要）
 # torch==2.11.0+cu128   # GPU 版本按实际 CUDA 版本安装，此处注释供参考
