@@ -29,8 +29,8 @@ account:
 
 # 实盘选股参数
 live:
-  topk: 5                      # 每日最多推荐 N 只股票
-  score_quantile: 0.8          # 只在 csi500 内打分前 20% 中再取 topk（提升信噪比）
+  topk: 8                      # v3 对齐：topk=8（与 daily_vol_target.yaml 一致）
+  score_quantile: 0.82         # v3 对齐：前 18% 候选池（提升信噪比）
   weight_method: "equal"       # equal=等权 | score=按打分比例 | inverse_vol=反波动率
   min_score_threshold: null    # 可选：打分低于此阈值的股票不推荐（null=不过滤）
   # 换仓提示阈值：当前持仓股票与新推荐偏差超过此分位时，标记为 "建议换仓"

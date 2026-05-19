@@ -68,6 +68,31 @@ _SEARCH_SPACE: Dict[str, Any] = {
 }
 
 
+def _aggregate_topk_vote_local(
+    pred_seeds: List[pd.Series],
+    topk: int,
+) -> pd.Series:
+    """
+    每 seed 取自身当日 top-K，按命中数聚合，输出最终 score。
+    与 run_experiment._aggregate_topk_vote 行为完全一致：
+      - vote_count: seed 命中 topK 的次数（0~N）
+      - tiebreaker: 平均 pct-rank 做小幅扰动，保证稳定排序
+
+    分离实现以避免 tuning 包对 run_experiment 的循环依赖。
+    """
+    if not pred_seeds:
+        raise ValueError("pred_seeds 为空，无法聚合")
+    wide = pd.concat(pred_seeds, axis=1)
+    rank_per_seed = wide.groupby(level="datetime").rank(pct=True)
+    in_topk = wide.groupby(level="datetime").rank(method="first", ascending=False) <= topk
+    vote_count = in_topk.sum(axis=1).astype(float)
+    mean_rank = rank_per_seed.mean(axis=1, skipna=True)
+    epsilon = 1.0 / (len(pred_seeds) + 1)
+    ensemble_score = vote_count + epsilon * mean_rank
+    ensemble_score.name = "score"
+    return ensemble_score
+
+
 def sample_params(trial: Any) -> Dict[str, Any]:
     """从 Optuna trial 中采样超参。"""
     params: Dict[str, Any] = {}
@@ -137,6 +162,7 @@ def _wf_oos_sharpe(
     trial_id: int,
     output_dir: Optional[Path] = None,
     strategy_override: Optional[Dict[str, Any]] = None,
+    ensemble_seeds: int = 1,
 ) -> float:
     """
     执行 WF 3-fold，拼接 OOS pred_score 后用 BacktestEngine 计算 Sharpe。
@@ -147,6 +173,9 @@ def _wf_oos_sharpe(
         trial_id:          trial 序号（仅用于日志）
         output_dir:        若非 None，将回测产物写到该目录（用于最优 trial 的可视化）
         strategy_override: 若非 None，将覆盖 oos_cfg 中的 strategy 段（对齐部署策略）
+        ensemble_seeds:    每个 fold 内训练几个 seed 做 ensemble。1 = 单 seed（旧行为）；
+                           >1 = 用 base_seed + i*1000 生成多 seed，每 fold 内训练 N 次，
+                           再用 topk_vote 聚合（与 run_experiment.py 的 ensemble 完全一致）。
 
     Returns:
         OOS Sharpe（失败返回 -inf）
@@ -200,9 +229,17 @@ def _wf_oos_sharpe(
     _logger.info("[trial %d] WF %d folds: %s ~ %s",
                  trial_id, len(folds), folds[0].test_start, folds[-1].test_end)
 
-    # ── 逐 fold 训练 + 预测 ───────────────────────────────────────
+    # ── 逐 fold 训练 + 预测（支持 ensemble）─────────────────────────
     base_seed = int(cfg.get("model", {}).get("kwargs", {}).get("seed", 42))
-    fold_preds: List[pd.Series] = []
+    seeds = [base_seed + i * 1000 for i in range(max(1, ensemble_seeds))]
+    fold_preds: List[pd.Series] = []  # 每个元素 = 该 fold 的 ensemble-aggregated score
+
+    # topk 用于 topk_vote 聚合，必须与部署策略的 topk 一致
+    topk_for_vote = int(
+        (strategy_override or cfg).get("strategy", {}).get("kwargs", {}).get("topk", 8)
+    ) if strategy_override else int(
+        cfg.get("strategy", {}).get("kwargs", {}).get("topk", 8)
+    )
 
     for fold in folds:
         # 复用共享 handler
@@ -215,24 +252,32 @@ def _wf_oos_sharpe(
             },
         )
 
-        # 注入 fold seed（与 run_experiment._train_fold 逻辑一致）
-        fold_model_cfg = copy.deepcopy(cfg["model"])
-        kw = fold_model_cfg.setdefault("kwargs", {})
-        for k in ("seed", "feature_fraction_seed", "bagging_seed", "data_random_seed"):
-            kw[k] = base_seed
-
+        seed_preds: List[pd.Series] = []
         t0 = time.perf_counter()
-        model: Model = init_instance_by_config(fold_model_cfg)
-        model.fit(dataset)
+        for seed_idx, seed in enumerate(seeds):
+            # 每个 seed 独立训练，仅覆盖随机种子，其他超参保持
+            fold_model_cfg = copy.deepcopy(cfg["model"])
+            kw = fold_model_cfg.setdefault("kwargs", {})
+            for k in ("seed", "feature_fraction_seed", "bagging_seed", "data_random_seed"):
+                kw[k] = seed
+
+            model: Model = init_instance_by_config(fold_model_cfg)
+            model.fit(dataset)
+            pred: pd.Series = model.predict(dataset, segment="test")
+            if isinstance(pred, pd.DataFrame):
+                pred = pred.iloc[:, 0]
+            seed_preds.append(pred.rename(f"seed_{seed}"))
+
         train_sec = round(time.perf_counter() - t0, 1)
 
-        pred: pd.Series = model.predict(dataset, segment="test")
-        if isinstance(pred, pd.DataFrame):
-            pred = pred.iloc[:, 0]
-        pred = pred.rename("score")
-        fold_preds.append(pred)
-        _logger.info("[trial %d] fold %d 训练完成 [%.1fs] n_pred=%d",
-                     trial_id, fold.fold_id, train_sec, len(pred))
+        # ensemble 聚合：1 seed 直接用，多 seed 用 topk_vote（与部署 run_experiment.py 一致）
+        if len(seed_preds) == 1:
+            fold_pred = seed_preds[0].rename("score")
+        else:
+            fold_pred = _aggregate_topk_vote_local(seed_preds, topk=topk_for_vote)
+        fold_preds.append(fold_pred)
+        _logger.info("[trial %d] fold %d 训练完成 [%.1fs] seeds=%d n_pred=%d",
+                     trial_id, fold.fold_id, train_sec, len(seeds), len(fold_pred))
 
     # ── 拼接 OOS pred_score ───────────────────────────────────────
     oos_pred = concat_oos_pred_scores(fold_preds)
@@ -280,11 +325,13 @@ class _Objective:
         shared_handler: Any,
         trial_output_dir: Optional[Path] = None,
         strategy_override: Optional[Dict[str, Any]] = None,
+        ensemble_seeds: int = 1,
     ) -> None:
         self.base_cfg = base_cfg
         self.shared_handler = shared_handler
         self.trial_output_dir = trial_output_dir
         self.strategy_override = strategy_override
+        self.ensemble_seeds = max(1, int(ensemble_seeds))
         self._trial_count = 0
 
     def __call__(self, trial: Any) -> float:
@@ -292,13 +339,15 @@ class _Objective:
         trial_id = trial.number
 
         params = sample_params(trial)
-        _logger.info("[trial %d] params: %s", trial_id, params)
+        _logger.info("[trial %d] params: %s ensemble_seeds=%d",
+                     trial_id, params, self.ensemble_seeds)
 
         trial_cfg = inject_params(self.base_cfg, params)
 
         # 设置 trial 参数为 trial.attrs，方便后续查询
         for k, v in params.items():
             trial.set_user_attr(k, v)
+        trial.set_user_attr("ensemble_seeds", self.ensemble_seeds)
 
         t0 = time.perf_counter()
         sharpe = _wf_oos_sharpe(
@@ -306,6 +355,7 @@ class _Objective:
             shared_handler=self.shared_handler,
             trial_id=trial_id,
             strategy_override=self.strategy_override,
+            ensemble_seeds=self.ensemble_seeds,
         )
         elapsed = round(time.perf_counter() - t0, 1)
         trial.set_user_attr("elapsed_sec", elapsed)
@@ -412,6 +462,16 @@ def main() -> None:
             "【推荐始终指定】保证 Optuna 评估策略与最终部署策略一致。"
         ),
     )
+    parser.add_argument(
+        "--ensemble-seeds",
+        type=int,
+        default=1,
+        help=(
+            "目标函数内部每个 fold 训练几个 seed 做 ensemble（默认 1 = 单 seed）。"
+            "设为 3 + topk_vote 聚合，可与 run_experiment.py 的 ensemble 部署完全对齐，"
+            "代价是单 trial 训练耗时 ×N。【强烈推荐】部署用 N seeds 时这里也设 N。"
+        ),
+    )
     args = parser.parse_args()
 
     try:
@@ -498,7 +558,16 @@ def main() -> None:
         else:
             _logger.warning("strategy_cfg 文件不存在：%s，使用 base 默认策略", strat_path)
 
-    objective = _Objective(base_cfg, shared_handler, strategy_override=strategy_override)
+    objective = _Objective(
+        base_cfg,
+        shared_handler,
+        strategy_override=strategy_override,
+        ensemble_seeds=args.ensemble_seeds,
+    )
+    _logger.info(
+        "目标函数 ensemble_seeds=%d（每 trial 训练 %d 模型 × %d folds = %d 次训练）",
+        args.ensemble_seeds, args.ensemble_seeds, 3, args.ensemble_seeds * 3,
+    )
 
     try:
         study.optimize(
