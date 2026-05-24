@@ -1,5 +1,8 @@
 # combined_factors_df 完整因子清单（15 个）—— v19
 
+> **注意（2026-05-24）**：V21 对照实验见 `--lab v21_20250524`（`configs/factor_lab/v21_20250524.json`，19 因子，源文档 `combined_factors_df_expressions_v21_20260524_2157.md`）。
+> 本文件对应 V19：`--lab v19_20260514`（15 因子）。
+
 > 生成时间: 2026-05-13 13:58:17
 > 时间窗: 2020-01-01 ~ 2026-05-12; 池: csi500; mode: strict; shape: [1426945, 15]
 > manifest 当前版本: **v19**; 对比版本: v18

@@ -13,11 +13,14 @@ $MODEL  = "lgbm_optuna"
 $FREQ   = "daily"
 $PYTHON = "C:\ProgramData\miniconda3\envs\qlib_zhengshi\python.exe"
 
+$TOPK   = 5   # live portfolio cap (backtest may use daily_vol_target topk=8)
+
 $pyArgs = @(
     "python/predict_live.py",
     "--model", $MODEL,
     "--freq",  $FREQ,
-    "--mode",  "predict-only"
+    "--mode",  "predict-only",
+    "--topk",  $TOPK
 )
 if ($Date -ne "") {
     $pyArgs += @("--date", $Date)

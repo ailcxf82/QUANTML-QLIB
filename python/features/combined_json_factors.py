@@ -91,6 +91,8 @@ _EXPR_BY_JSON_NAME: dict[str, str] = {
     "winsorized_zscore_volume_ratio": "$volume_ratio",
     # 16. turnover_surprise_20: 当日换手 / 20日均换手
     "turnover_surprise_20": "$turnover_rate/(Mean($turnover_rate,20)+1e-12)",
+    # 16b. turnover_deviation_20d: 当日换手 - 20 日均换手（v21 替代 turnover_surprise_20）
+    "turnover_deviation_20d": "$turnover_rate - Mean($turnover_rate, 20)",
     # 17. rank_turnover_deviation_20d: 截面 rank → 时序偏离度降级
     "rank_turnover_deviation_20d": (
         "$turnover_rate/(Mean($turnover_rate,20)+1e-12)-1"
@@ -115,6 +117,8 @@ _EXPR_BY_JSON_NAME: dict[str, str] = {
     #    旧版本用 ratio (Ref/x-1)，此次按 markdown diff(60) 修正：
     #    diff 在 ROE 接近 0 时数值稳定，更适合长周期改善信号
     "roe_momentum_60d": "$roe-Ref($roe,60)",
+    # 25b. ROEAccel_60D: ROE 60 日变化 / 其 60 日滚动标准差（v21）
+    "ROEAccel_60D": "($roe-Ref($roe,60))/(Std($roe-Ref($roe,60),60)+1e-12)",
     # 26. rank_pb_roe: 截面 rank(roe)-rank(pb) → 时序 roe-pb 降级
     "rank_pb_roe": "$roe-$pb",
     # 27. intraday_range: (high-low)/close 日内振幅（与 base 因子 KLEN 分母不同）
@@ -128,6 +132,10 @@ _EXPR_BY_JSON_NAME: dict[str, str] = {
     # 30. turnover_acceleration_5d: 5 日 / 10 日均换手 - 1
     "turnover_acceleration_5d": (
         "Mean($turnover_rate,5)/(Mean($turnover_rate,10)+1e-12)-1"
+    ),
+    # 30b. Turnover_Acceleration_10D: 5 日均换手 / 5 日前 5 日均换手 - 1（v21，与 turnover_accel_5d 不同）
+    "Turnover_Acceleration_10D": (
+        "Mean($turnover_rate,5)/(Ref(Mean($turnover_rate,5),5)+1e-12)-1"
     ),
     # 31. roe_pb_momentum_divergence_60d: ROE 改善 - PB 涨幅
     "roe_pb_momentum_divergence_60d": (
@@ -152,6 +160,8 @@ _EXPR_BY_JSON_NAME: dict[str, str] = {
     # 40. quarterly_eps: 季度 EPS
     #    旧版本曾用 $eps（年度），此次按 markdown 修正为 $q_eps（季度）
     "quarterly_eps": "$q_eps",
+    # 40b. eps_yield: 季度 EPS / 复权收盘价（v21）
+    "eps_yield": "$q_eps/($close_qfq+1e-12)",
     # 41. turnover_rate_f_ma_15d: 注意 markdown 中此因子 IC 为负（短期高换手反指）
     "turnover_rate_f_ma_15d": "Mean($turnover_rate_f,15)",
     # 42. roe_quality: 直接用 ROE

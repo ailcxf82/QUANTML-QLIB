@@ -77,6 +77,8 @@
 | --- | --- | --- | --- |
 | `base_only.json` | 0 | 20 | 哨兵：base-only 基线锚点；运行时不读文件 |
 | `new_md_full15.json` | 15 | 35 | new.md 全量 15 因子（含与 v18-v2 重叠的 8 个）；用于看 new.md 整套相对纯 base 的边际 |
+| `v19_20260514.json` | 15 | 35 | V19 因子库（`combined_factors_df_expressions_v19_20260514_2021.md`） |
+| `v21_20250524.json` | 19 | 39 | V21 因子库（`combined_factors_df_expressions_v21_20260524_2157.md`）；主对比 `v19_20260514` |
 
 ## 6. 常用命令速记
 
@@ -84,6 +86,8 @@
 # 单切分（约 2 分钟）
 python python/run_experiment.py --model lgbm_lab --freq daily --lab base_only
 python python/run_experiment.py --model lgbm_lab --freq daily --lab new_md_full15
+python python/run_experiment.py --model lgbm_lab --freq daily --lab v19_20260514
+python python/run_experiment.py --model lgbm_lab --freq daily --lab v21_20250524
 
 # 完整 WF（约 14 分钟）
 python python/run_experiment.py --model lgbm_lab --freq daily --lab new_md_full15 \

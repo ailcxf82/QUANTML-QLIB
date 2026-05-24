@@ -1,0 +1,47 @@
+{
+  "created_at": "2026-05-24",
+  "purpose": "V21 因子库（v21_20250524）：与 combined_factors_df_expressions_v21_20260524_2157.md 的 19 因子组合对齐，在因子试验台跑 lgbm_lab 隔离实验。",
+  "source_md": "configs/combined_factors_df_expressions_v21_20260524_2157.md",
+  "compare_to": "v19_20260514",
+  "n_factors": 19,
+  "expected_total_features": "20 base + 19 combined = 39 维",
+  "factors": [
+    { "name": "rank_close_open" },
+    { "name": "close_location" },
+    { "name": "log_signed_volume" },
+    { "name": "ValueMR_20D" },
+    { "name": "close_location_ma_5" },
+    { "name": "roe_momentum_5d_interaction" },
+    { "name": "earnings_yield_momentum_5d_interaction" },
+    {
+      "name": "turnover_deviation_20d",
+      "qlib_expr": "$turnover_rate - Mean($turnover_rate, 20)"
+    },
+    { "name": "winsorized_zscore_volume_ratio" },
+    { "name": "turnover_acceleration_5d" },
+    {
+      "name": "overnight_return_5d_avg",
+      "qlib_expr": "Mean(($open_qfq-Ref($close_qfq,1))/(Ref($close_qfq,1)+1e-12),5)"
+    },
+    { "name": "sma_volume_ratio_10d" },
+    {
+      "name": "eps_yield",
+      "qlib_expr": "$q_eps/($close_qfq+1e-12)"
+    },
+    {
+      "name": "amihud_illiquidity_20d",
+      "qlib_expr": "Mean(Abs($close_qfq/(Ref($close_qfq,1)+1e-12)-1)/($close_qfq*$volume+1e-12),20)"
+    },
+    { "name": "roe_momentum_60d" },
+    { "name": "intraday_range" },
+    {
+      "name": "Turnover_Acceleration_10D",
+      "qlib_expr": "Mean($turnover_rate,5)/(Ref(Mean($turnover_rate,5),5)+1e-12)-1"
+    },
+    { "name": "volume_ratio_ma_15d" },
+    {
+      "name": "ROEAccel_60D",
+      "qlib_expr": "($roe-Ref($roe,60))/(Std($roe-Ref($roe,60),60)+1e-12)"
+    }
+  ]
+}
