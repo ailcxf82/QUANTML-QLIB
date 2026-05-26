@@ -1,0 +1,97 @@
+# 公共基础配置：qlib 初始化、实验元数据、数据处理器、特征工程、交易策略
+# 由 run_experiment.py 与各 model/freq 配置深度合并后使用
+# 不含 model、executor、backtest、dataset.segments（由各子配置提供）
+
+qlib_init:
+  provider_uri: "D:/qlib_data/qlib_data"
+  region: cn
+
+experiment:
+  run_id: "experiment"
+  # 训练 universe 仍用 "all"（qlib 数据集 csi500 是当前快照，训练期无数据，
+  # 直接把训练集设为 csi500 会得到空 dataset）
+  market: "all"
+  benchmark: "000905.SZ"
+  start_time: "2020-01-01"
+  end_time: "2026-05-22"
+  seed: 42
+  account: 300000
+  # 回测可投资股票池：只在 csi500 中选股，避免选到 ST/小盘/退市风险股
+  # 由 run_experiment.py 在 pred_score 生成后做掩膜过滤
+  tradable_universe: "csi500"
+
+strategy:
+  class: "TopkDropoutStrategy"
+  module_path: "qlib.contrib.strategy"
+  kwargs:
+    # 30 万账户散户口径：
+    #   topk=5 → 单票预算约 5.7 万元（cash * 0.95 / 5）
+    #   单票权重 19%（明显高于机构 5% 上限，但散户场景常见且可承受）
+    #   再小账户（10 万）建议 topk=3
+    topk: 5
+    # 每期最多换出 1 只 → 平均持有期约 5 个交易日，月换手 ≈ 100%
+    n_drop: 1
+    # 风控：只在可交易标的中下单（自动跳过停牌、当日涨跌停的票）
+    only_tradable: true
+    # 风控：若全部候选股触及涨跌停，直接放弃当日调仓
+    forbid_all_trade_at_limit: true
+
+dataset:
+  class: "DatasetH"
+  module_path: "qlib.data.dataset"
+  kwargs:
+    handler:
+      class: "DataHandlerLP"
+      module_path: "qlib.data.dataset.handler"
+      kwargs:
+        start_time: "2020-01-01"
+        end_time: "2026-05-22"
+        # 训练用全市场（保留特征丰富度），回测时通过 tradable_universe 过滤
+        instruments: "all"
+        infer_processors:
+          - class: Fillna
+            module_path: qlib.data.dataset.processor
+            kwargs:
+              fields_group: feature
+          - class: CSZScoreNorm
+            module_path: qlib.data.dataset.processor
+            kwargs:
+              fields_group: feature
+              method: robust
+          - class: Fillna
+            module_path: qlib.data.dataset.processor
+            kwargs:
+              fields_group: feature
+        learn_processors:
+          - class: DropnaLabel
+            module_path: qlib.data.dataset.processor
+          - class: Fillna
+            module_path: qlib.data.dataset.processor
+            kwargs:
+              fields_group: feature
+          - class: CSZScoreNorm
+            module_path: qlib.data.dataset.processor
+            kwargs:
+              fields_group: feature
+              method: robust
+          - class: Fillna
+            module_path: qlib.data.dataset.processor
+            kwargs:
+              fields_group: feature
+          - class: CSZScoreNorm
+            module_path: qlib.data.dataset.processor
+            kwargs:
+              fields_group: label
+              method: robust
+        data_loader:
+          class: QlibDataLoader
+          module_path: qlib.data.dataset.loader
+          kwargs:
+            config:
+              # feature 字段由 run_experiment.py 调用 features.build_feature_config()
+              # 根据 model_meta.feature_groups 动态注入，此处无需手动维护。
+              # 因子定义见 python/features/（momentum / volume / technical / fundamental）。
+              feature: []
+              label:
+                - - "Ref($close_qfq,-2)/Ref($close_qfq,-1)-1"
+                - - "LABEL0"
