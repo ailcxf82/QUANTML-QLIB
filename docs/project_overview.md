@@ -188,6 +188,8 @@ pytest tests/python/
 | `daily_retrain`      | 月度可复现训练 + 回测   | 冻结快照 `qlib_data_train_<MONTH>` |
 | `daily_prod`         | 短窗口 sanity     | LIVE                           |
 | `daily_prod_retrain` | 短窗口 sanity（冻结） | 冻结快照                           |
+| `daily_5d_label`     | 5 日标签变体         | 同 `daily` 数据路径，见 `configs/freq/daily_5d_label.yaml` |
+| `daily_t1_open`      | T+1 开盘 open-open 对照 | 同 `daily_retrain` 冻结路径，见 `configs/freq/daily_t1_open.yaml`；别名 `t1_open` |
 | `minute`             | 分钟频（需数据就绪）     | 见 `configs/freq/minute.yaml`   |
 
 

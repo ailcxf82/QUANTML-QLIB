@@ -1,0 +1,38 @@
+# Walk-Forward 扩展窗口配置（季度步长）
+# =========================================================
+# W1 新增（2026-05-26）：相对 expanding_halfyearly.yaml 的 4 fold 6 月步长，
+# 本配置使用季度步长，OOS 区间被切成更细的 5-6 个 fold。
+#
+# 用法：python python/run_experiment.py --model lgbm --freq daily_retrain \
+#             --rolling-mode walk_forward \
+#             --rolling-cfg configs/rolling/expanding_quarterly.yaml
+#
+# 切分示意（基于 2020-01-01 ~ 2026-04-28 的 6 年数据，约 5 个 fold）：
+#   fold1: train=[2020-01-01, 2024-09-23]  valid=[2024-10-01, 2024-12-31]  test=[2025-01-01, 2025-03-31]
+#   fold2: train=[2020-01-01, 2024-12-24]  valid=[2025-01-01, 2025-03-31]  test=[2025-04-01, 2025-06-30]
+#   fold3: train=[2020-01-01, 2025-03-23]  valid=[2025-04-01, 2025-06-30]  test=[2025-07-01, 2025-09-30]
+#   fold4: train=[2020-01-01, 2025-06-23]  valid=[2025-07-01, 2025-09-30]  test=[2025-10-01, 2025-12-31]
+#   fold5: train=[2020-01-01, 2025-09-23]  valid=[2025-10-01, 2025-12-31]  test=[2026-01-01, 2026-04-28]
+#
+# OOS 总覆盖：2025-01-01 ~ 2026-04-28 约 16 个月（与 halfyearly 相同），但每个 fold
+# 只跑 3 个月、验证集也只 3 个月，对"季度风格切换"更敏感。
+#
+# 何时使用本配置 vs halfyearly：
+#   - halfyearly（4 folds × 6m valid + 6m test）：稳态评估，trade-off 倾向 noise 容忍
+#   - quarterly（5 folds × 3m valid + 3m test）：捕捉季度风格切换（2025 小盘风格年
+#     每个季度持续期≈3个月），fold 内部更同质化；缺点是 valid 集小 → 早停噪声更大
+#
+# Optuna 目标函数说明：
+#   optuna_lgbm.py 当前硬编码用 halfyearly 的 [4y / 6m / 6m] 切分，本配置需要
+#   通过 run_experiment.py --rolling-cfg 路径使用；如需 Optuna 切到本配置，
+#   需把 optuna_lgbm.py 的 build_walk_forward_folds 参数也同步改成 3m。
+
+rolling:
+  mode: walk_forward
+  oos_start: "2025-01-01"
+  train_min: "4y"              # 最小训练 4 年（≥ halfyearly）
+  valid_size: "3m"             # 验证集 3 个月（季度）
+  test_size: "3m"              # 测试集 3 个月（季度）
+  step: "3m"                   # 季度滚动
+  purge_days: 2                # label = Ref(-2,-1) → purge=2
+  embargo_days: 5              # 额外缓冲，total_gap = 7 自然日

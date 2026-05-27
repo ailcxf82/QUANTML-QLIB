@@ -45,7 +45,8 @@ backtest:
     freq: "day"
     limit_threshold: 0.095
     deal_price: "$close_qfq"
-    open_cost: 0.0025
-    close_cost: 0.0035
+    # W1 修正（2026-05-26）：cost 双边各加 10bp 滑点估计（详见 daily.yaml）
+    open_cost: 0.0035
+    close_cost: 0.0045
     min_cost: 5
     impact_cost: 0

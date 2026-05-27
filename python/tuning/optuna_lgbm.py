@@ -54,16 +54,27 @@ logging.basicConfig(
 _logger = logging.getLogger("optuna_lgbm")
 
 # ─────────────────────────────────────────────────────────────────
-# 搜索空间定义（7 维）
+# 搜索空间定义（W1 扩展：9 维）
 # ─────────────────────────────────────────────────────────────────
-
+#
+# W1 扩展（2026-05-26）相对原 7 维：
+#   - feature_fraction 下界 0.50 → 0.40：强化列子采样多样性（ensemble seeds=5 时
+#     列扰动是 Sharpe 提升的主要驱动，T1-A 教训①）
+#   - bagging_fraction 下界 0.50 → 0.45：与 feature_fraction 配合
+#   - min_child_samples 上界 500 → 700：允许更保守的叶节点（high lr 时减少噪声）
+#   - 新增 path_smooth：叶子值平滑，跨周期稳定性关键（lgbm.yaml 注释强调）
+#   - 新增 reg_alpha：L1 正则的范围搜索（之前固定 0.3）
+#
+# 搜索维度保持 ≤ 10 以控制单 trial 计算量，仍可在 50 trials 内覆盖。
 _SEARCH_SPACE: Dict[str, Any] = {
     "num_leaves":         {"type": "int",   "low": 15,   "high": 63},
-    "learning_rate":      {"type": "float", "low": 0.005, "high": 0.05, "log": True},
-    "min_child_samples":  {"type": "int",   "low": 50,   "high": 500},
-    "feature_fraction":   {"type": "float", "low": 0.50, "high": 0.95},
-    "bagging_fraction":   {"type": "float", "low": 0.50, "high": 0.95},
-    "reg_lambda":         {"type": "float", "low": 0.5,  "high": 10.0, "log": True},
+    "learning_rate":      {"type": "float", "low": 0.005, "high": 0.05,  "log": True},
+    "min_child_samples":  {"type": "int",   "low": 50,    "high": 700},
+    "feature_fraction":   {"type": "float", "low": 0.40,  "high": 0.95},
+    "bagging_fraction":   {"type": "float", "low": 0.45,  "high": 0.95},
+    "reg_lambda":         {"type": "float", "low": 0.5,   "high": 10.0,  "log": True},
+    "reg_alpha":          {"type": "float", "low": 0.0,   "high": 2.0},
+    "path_smooth":        {"type": "float", "low": 0.0,   "high": 5.0},
     "extra_trees":        {"type": "cat",   "choices": [True, False]},
 }
 
@@ -412,18 +423,27 @@ def main() -> None:
         description="Optuna LGBM 超参搜索（目标函数：WF OOS Sharpe）",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
+W1 默认行为（2026-05-26 改）：
+  - strategy-cfg 默认为 configs/strategy/daily_vol_target.yaml（评估-部署一致，
+    避免 T1-D 复盘的 WF Sharpe 7.15 → 实盘 2.03 的退化）
+  - ensemble-seeds 默认 5（与 T1-A 教训"3 seeds 不够多样化"对齐）
+  - 搜索空间扩到 9 维（feature_fraction/bagging_fraction 下界放宽 + path_smooth）
+  - 单 trial 耗时 ≈ 5 seeds × 3 folds × ~5min ≈ 75min，50 trials ≈ 62 小时
+
 示例：
-  # 首次启动（推荐：指定部署策略，保证评估-部署一致）
-  python python/tuning/optuna_lgbm.py --n-trials 50 \\
-      --strategy-cfg configs/strategy/daily_vol_target.yaml
+  # 首次启动（推荐：使用默认）
+  python python/tuning/optuna_lgbm.py --n-trials 50
 
   # 中断后续跑
-  python python/tuning/optuna_lgbm.py --n-trials 50 --resume \\
-      --strategy-cfg configs/strategy/daily_vol_target.yaml
+  python python/tuning/optuna_lgbm.py --n-trials 50 --resume
+
+  # 短时间冒烟验证（3 trials × 单 seed，~30 分钟）
+  python python/tuning/optuna_lgbm.py --n-trials 3 --ensemble-seeds 1
 
   # 搜索完成后对比
   python python/run_experiment.py --model lgbm_optuna --freq daily_retrain \\
-      --strategy-cfg configs/strategy/daily_vol_target.yaml
+      --strategy-cfg configs/strategy/daily_vol_target.yaml \\
+      --ensemble-seeds 5 --aggregator topk_vote
         """,
     )
     parser.add_argument("--n-trials", type=int, default=50, help="搜索 trial 数量（默认 50）")
@@ -454,25 +474,29 @@ def main() -> None:
     )
     parser.add_argument(
         "--strategy-cfg",
-        default=None,
+        default="configs/strategy/daily_vol_target.yaml",
         help=(
             "部署策略配置 YAML 路径（相对仓库根），用于覆盖目标函数中的回测策略。"
-            "例：--strategy-cfg configs/strategy/daily_vol_target.yaml。"
-            "不指定时使用 base.yaml 默认的 TopkDropoutStrategy（与 T1 旧行为一致）。"
-            "【推荐始终指定】保证 Optuna 评估策略与最终部署策略一致。"
+            "W1 默认 daily_vol_target.yaml（含 MarketTimer + RiskParity + AdaptiveTopK），"
+            "保证 Optuna 评估策略 = 实盘部署策略，避免 T1-D 评估-部署不一致退化。"
+            "传 'none' 字符串可强制不指定策略（fallback 到 base.yaml 的 TopkDropoutStrategy）。"
         ),
     )
     parser.add_argument(
         "--ensemble-seeds",
         type=int,
-        default=1,
+        default=5,
         help=(
-            "目标函数内部每个 fold 训练几个 seed 做 ensemble（默认 1 = 单 seed）。"
-            "设为 3 + topk_vote 聚合，可与 run_experiment.py 的 ensemble 部署完全对齐，"
-            "代价是单 trial 训练耗时 ×N。【强烈推荐】部署用 N seeds 时这里也设 N。"
+            "目标函数内部每个 fold 训练几个 seed 做 ensemble（W1 默认 5）。"
+            "5 + topk_vote 与生产 ensemble 部署完全对齐（T1-A 教训：3 seeds 多样性不足）。"
+            "单 trial 训练耗时 ≈ N × 3 folds × ~5min。需快速冒烟时可降到 1 或 3。"
         ),
     )
     args = parser.parse_args()
+
+    # 'none' / 'null' 字符串 → 显式禁用 strategy_override
+    if args.strategy_cfg and args.strategy_cfg.lower() in ("none", "null", "false"):
+        args.strategy_cfg = None
 
     try:
         import optuna

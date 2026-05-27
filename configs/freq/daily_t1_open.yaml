@@ -1,0 +1,96 @@
+# T+1 开盘买入对照实验（label/撮合同步切到 open-to-open）
+# =========================================================
+# 创建日期：2026-05-26（W1 撮合修正配套）
+#
+# 设计动机：
+#   主链路 daily.yaml / daily_retrain.yaml 用 close-to-close 标签
+#   （Ref($close_qfq,-2)/Ref($close_qfq,-1)-1）+ deal_price=$close_qfq。
+#   这种"close→close"对齐在回测里是无 bias 的，但实盘时序是：
+#       T 日盘后跑预测 → T+1 开盘买入 → T+2 开盘卖出
+#   等价于 open-to-open 收益，与 close-to-close 之间隔了"T+1/T+2 的开-收
+#   段"，A 股日内开-收波动均值约 ±0.3-0.5%，长期来看是噪声但日单方向时
+#   可能贡献 5-8pp/年的 alpha 偏差。
+#
+# 本配置的修正：
+#   1) label：Ref($close_qfq,-2)/Ref($close_qfq,-1)-1
+#         →  Ref($open_qfq,-2)/Ref($open_qfq,-1)-1
+#      含义：T+1 开盘买入持有到 T+2 开盘卖出的 1 日收益
+#   2) deal_price："close" / "$close_qfq" → "$open_qfq"
+#   3) handler.end_time 多留 1 个交易日，给 Ref(-2) 留前瞻空间
+#
+# 使用方式：
+#   # 直接对比 close-to-close 主链路（建议同 commit、同 seed 跑两次）
+#   python python/run_experiment.py --model lgbm_optuna --freq daily_t1_open
+#   python python/run_experiment.py --model lgbm_optuna --freq daily_retrain
+#
+# 验收门禁：
+#   - OOS sharpe 与 daily_retrain 偏差 < 0.15（说明开-收 bias 不显著）
+#     则下次 retrain 可考虑直接切到本配置作为生产链路
+#   - 若 sharpe 显著高于 daily_retrain → 说明回测在偷看 T+1 开-收段，
+#     必须切到本配置消除 bias
+#   - 若 sharpe 显著低于 daily_retrain → A 股开盘竞价噪声更大，
+#     维持 close-to-close 主链路
+#
+# 风险与注意事项：
+#   - 与 daily_retrain 不可共用模型 pkl（label 字段不同 → 训练目标不同）
+#     latest_<model>_daily_t1_open.pkl 产物独立
+#   - predict_live.py 当前用 daily.yaml/daily_live.yaml，**未切换到本配置**
+#     如需上线 T+1 open 撮合，需同时更新 predict_live 的读取路径
+#   - DropnaLabel 会丢弃末端 1-2 行（Ref(-2) 需要未来数据），影响微小
+
+freq_meta:
+  name: "daily_t1_open"
+  freq_key: "1day"
+
+# 切分对齐 configs/freq/daily.yaml（研究用长 OOS），勿用 daily_retrain 的「月度短 test」。
+#
+# 踩坑记录（2026-05-26）：
+#   daily_retrain 经 update_retrain_segments.py 会把 test 缩成仅当月（如 2026-05-01~05-22），
+#   用于 monthly_retrain 门禁；但冻结快照 qlib_data_train_20260516 行情只到约 2026-05-14，
+#   实际 predict 往往只有 7~10 个交易日 → 年化 sharpe/收益被放大到 -13 / -86% 等无意义数字。
+#   与 daily_retrain 同段短 test 对比时，open 标签 5 seed IC 全负 + topk_vote 仍换手 → 更差；
+#   close 标签 ensemble IC 仍可为正但 per_seed 全负 → 几乎不下单（ann_ret=0）。
+#
+# 正确 A/B：train/valid/test 与 daily.yaml 一致，再只改 label + deal_price。
+dataset_segments:
+  train: ["2020-01-01", "2023-12-31"]
+  valid: ["2024-01-01", "2024-12-31"]
+  test:  ["2025-01-01", "2026-04-30"]
+
+qlib_init:
+  provider_uri: "D:/qlib_data/qlib_data_train_20260516"
+  region: cn
+
+# label / handler end_time 覆盖
+dataset:
+  kwargs:
+    handler:
+      kwargs:
+        # 与 daily.yaml test 末端对齐；Ref(-2) 需多 2 个交易日
+        end_time: "2026-05-12"
+        data_loader:
+          kwargs:
+            config:
+              label:
+                - - "Ref($open_qfq,-2)/Ref($open_qfq,-1)-1"
+                - - "LABEL0"
+
+executor:
+  class: "SimulatorExecutor"
+  module_path: "qlib.backtest.executor"
+  kwargs:
+    time_per_step: "day"
+    generate_portfolio_metrics: true
+
+backtest:
+  exchange_kwargs:
+    freq: "day"
+    limit_threshold: 0.095
+    # 与 label 字段对齐：撮合在 T+1 开盘按 $open_qfq 成交，与 label 起点完全一致
+    deal_price: "$open_qfq"
+    # 滑点估计：开盘竞价滑点比收盘大约 1.5×（A 股集合竞价深度浅）
+    # 双边各 +15bp（vs 主链路 +10bp）
+    open_cost: 0.0040
+    close_cost: 0.0050
+    min_cost: 5
+    impact_cost: 0

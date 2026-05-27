@@ -142,6 +142,9 @@ _FREQ_ALIASES: Dict[str, str] = {
     "daily_5d_label": "daily_5d_label",
     "5d": "daily_5d_label",
     "5day": "daily_5d_label",
+    # T+1 开盘：label/撮合同步 open-to-open（configs/freq/daily_t1_open.yaml）
+    "daily_t1_open": "daily_t1_open",
+    "t1_open": "daily_t1_open",
     "minute": "minute",
     "min": "minute",
     "1min": "minute",

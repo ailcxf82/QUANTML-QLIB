@@ -4,28 +4,28 @@
 model:
   class: LGBModel
   kwargs:
-    bagging_fraction: 0.6860432332462661
+    bagging_fraction: 0.6370761961280168
     bagging_freq: 1
     bagging_seed: 42
     data_random_seed: 42
     deterministic: true
     early_stopping_rounds: 200
     extra_trees: true
-    feature_fraction: 0.5047816900960647
+    feature_fraction: 0.8637788066524075
     feature_fraction_bynode: 0.85
     feature_fraction_seed: 42
     force_col_wise: true
-    learning_rate: 0.005460576813228481
+    learning_rate: 0.044448339535094646
     loss: mse
     max_depth: 5
-    min_child_samples: 221
+    min_child_samples: 485
     min_split_gain: 0.0
     num_boost_round: 5000
-    num_leaves: 62
+    num_leaves: 18
     num_threads: -1
     path_smooth: 2.0
     reg_alpha: 0.3
-    reg_lambda: 1.6588479982880022
+    reg_lambda: 0.6699530280754894
     seed: 42
   module_path: qlib.contrib.model.gbdt
 model_meta:

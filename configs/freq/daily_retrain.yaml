@@ -42,8 +42,10 @@ backtest:
   exchange_kwargs:
     freq: "day"
     limit_threshold: 0.095
-    deal_price: "close"
-    open_cost: 0.0025
-    close_cost: 0.0035
+    # W1 修正（2026-05-26）：与 daily.yaml 同步——deal_price 统一为 $close_qfq、
+    # 双边各加 10bp 滑点（详细注释见 daily.yaml）。
+    deal_price: "$close_qfq"
+    open_cost: 0.0035
+    close_cost: 0.0045
     min_cost: 5
     impact_cost: 0
