@@ -28,15 +28,27 @@ from pathlib import Path
 from typing import Optional
 
 from .base import AlphaDef, VALID_GROUPS
-from . import fundamental, momentum, technical, volume
+from . import fundamental, momentum, raw_ohlcv, technical, volume
 
 # ── 内置因子注册表（顺序即 QlibDataLoader 中的列顺序）────────────────
+# raw_ohlcv 放最末位，便于审计但属于 opt-in 组（见 _OPT_IN_GROUPS）。
 _BUILTIN_ALPHAS: list[AlphaDef] = (
     momentum.ALPHAS
     + volume.ALPHAS
     + technical.ALPHAS
     + fundamental.ALPHAS
+    + raw_ohlcv.ALPHAS
 )
+
+# ── Opt-in 因子组 ─────────────────────────────────────────────────────
+# 这些组仅在 model_meta.feature_groups 显式列出时才参与构建特征空间，
+# 当 feature_groups 为 None（拉全部）时自动排除，避免污染既有 LGBM/MLP
+# 主链路（它们当前均设 feature_groups: null，期望保持原有 4 组语义）。
+#
+# raw_ohlcv 设计动机：专供时序模型（LSTM/GRU/Transformer dataset_type=ts）
+# 使用，与 LGBM 的浓缩因子分工（docs/时序模型优化.md §8.5）。原始 OHLCV
+# 序列对 LGBM 价值低反而引入冗余/噪声。
+_OPT_IN_GROUPS: frozenset[str] = frozenset({"raw_ohlcv"})
 
 
 def _discover_rdagent_alphas() -> list[AlphaDef]:
@@ -69,8 +81,13 @@ def get_registry(
     返回满足过滤条件的 AlphaDef 列表（仅 enabled=True 的因子）。
 
     参数:
-        groups         因子组过滤列表；None 表示全部组
+        groups         因子组过滤列表；None 表示全部组（自动排除 _OPT_IN_GROUPS）
         include_rdagent 是否包含 rdagent/ 目录中的因子
+
+    Opt-in 语义:
+        当 groups is None（如 lgbm.yaml 的 feature_groups: null）时，
+        _OPT_IN_GROUPS 中的组（当前为 raw_ohlcv）不会被自动拉取，需在
+        model_meta.feature_groups 显式列出才生效。保护 LGBM 主链路。
 
     异常:
         ValueError: groups 包含非法组名时抛出
@@ -87,7 +104,9 @@ def get_registry(
         all_alphas += _discover_rdagent_alphas()
 
     active = [a for a in all_alphas if a.enabled]
-    if groups is not None:
+    if groups is None:
+        active = [a for a in active if a.group not in _OPT_IN_GROUPS]
+    else:
         active = [a for a in active if a.group in groups]
 
     return active

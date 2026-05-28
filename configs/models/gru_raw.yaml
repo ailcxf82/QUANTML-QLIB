@@ -1,0 +1,49 @@
+# GRU 模型 + 原始 OHLCV 序列输入（严格 A/B 对照 gru.yaml）
+# ============================================================
+# 设计动机：docs/时序模型优化.md §8.5 LGBM × 时序模型分工设计
+#
+# 与 configs/models/gru.yaml 的唯一差异：
+#   feature_groups: [momentum, volume, technical]  →  [raw_ohlcv]
+# 其他所有超参（step_len, hidden_size, num_layers, dropout, lr, batch_size,
+# early_stop, loss, optimizer, seed, GPU）保持一致，以做严格变量隔离 A/B。
+#
+# 验证目标：
+#   1) gru_raw 与 LGBM 主力的 pred 相关性 ρ < 0.85（信息源真正分离）
+#   2) gru_raw 单模型 OOS IC 至少不低于 gru 原配置 -0.005（换输入未崩盘）
+#   3) 0.7×rank(lgbm) + 0.3×rank(gru_raw) ensemble OOS Sharpe ≥ max(单模型) + 0.05
+#
+# Opt-in 因子组：
+#   raw_ohlcv 在 python/features/__init__.py 中标记为 _OPT_IN_GROUPS，
+#   只有显式列入 feature_groups 时才会被拉取；不会污染 LGBM/MLP 主链路
+#   （它们的 feature_groups 为 null 时自动排除 raw_ohlcv）。
+#
+# 注意：
+#   d_feat 由 run_experiment.py 根据 feature_count(["raw_ohlcv"]) 动态注入（=5），
+#   YAML 中的值仅为占位，无需手动维护。
+
+model_meta:
+  name: "gru_raw"
+  dataset_type: "ts"
+  step_len: 20             # 与 gru.yaml 一致，严格 A/B 变量隔离
+  freq_key: "1day"
+  feature_groups:
+    - raw_ohlcv            # 5 维原始 OHLCV，与 LGBM 主力 (momentum/volume/technical/fundamental) 分离
+
+model:
+  class: "GRU"
+  module_path: "qlib.contrib.model.pytorch_gru_ts"
+  kwargs:
+    d_feat: 5              # 占位（run_experiment 会自动覆盖为 feature_count）
+    hidden_size: 64
+    num_layers: 2
+    dropout: 0.1
+    n_epochs: 100
+    lr: 0.001
+    metric: ""
+    batch_size: 800
+    early_stop: 20
+    loss: "mse"
+    optimizer: "adam"
+    n_jobs: 4
+    GPU: -1
+    seed: 42

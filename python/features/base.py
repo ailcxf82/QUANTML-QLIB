@@ -15,7 +15,7 @@ from dataclasses import dataclass, field
 
 
 # 合法的因子分组，用于 feature_groups 过滤
-VALID_GROUPS = frozenset({"momentum", "volume", "technical", "fundamental"})
+VALID_GROUPS = frozenset({"momentum", "volume", "technical", "fundamental", "raw_ohlcv"})
 
 
 @dataclass

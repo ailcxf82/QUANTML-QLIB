@@ -34,6 +34,7 @@ from __future__ import annotations
 
 import argparse
 import copy
+import inspect
 import json
 import sys
 import time
@@ -80,6 +81,16 @@ VERSION = "v2"
 WORKSPACE_ROOT = Path(__file__).resolve().parents[1]
 
 
+def _predict_on_test_segment(model: Any, dataset: Any, segment: str = "test") -> pd.Series:
+    """在指定数据段上推理；兼容 predict(dataset, segment=...) 与 predict(dataset) 两种契约。"""
+    try:
+        if "segment" in inspect.signature(model.predict).parameters:
+            return model.predict(dataset, segment=segment)
+    except (TypeError, ValueError):
+        pass
+    return model.predict(dataset)
+
+
 # ─────────────────────────────────────────────────────────────────
 # 数据结构
 # ─────────────────────────────────────────────────────────────────
@@ -121,6 +132,10 @@ _MODEL_ALIASES: Dict[str, str] = {
     "lstm": "lstm",
     # gru
     "gru": "gru",
+    # gru_raw: 与 gru 严格 A/B，仅 feature_groups=[raw_ohlcv]（5 维原始 OHLCV 序列）。
+    # 用于验证 LGBM × 时序模型「信息源分工」假设，详见 docs/时序模型优化.md §8.5。
+    "gru_raw": "gru_raw",
+    "gruraw": "gru_raw",
     # transformer
     "transformer": "transformer",
 }
@@ -472,7 +487,7 @@ def train_predict_ensemble(
         elapsed = round(time.perf_counter() - t0, 2)
         train_secs.append(elapsed)
 
-        pred = model.predict(dataset, segment=test_segment)
+        pred = _predict_on_test_segment(model, dataset, segment=test_segment)
         if isinstance(pred, pd.DataFrame):
             pred = pred.iloc[:, 0]
         pred_seeds.append(pred.rename(f"seed_{seed}"))
@@ -931,7 +946,7 @@ def _train_fold(
     train_sec = round(time.perf_counter() - t1, 2)
     _log(run_ctx.run_id, f"[fold {fold.fold_id}] train_done [{train_sec}s] seed={seed}")
 
-    pred: pd.Series = model.predict(dataset, segment=test_segment)
+    pred: pd.Series = _predict_on_test_segment(model, dataset, segment=test_segment)
     if isinstance(pred, pd.DataFrame):
         pred = pred.iloc[:, 0]
     pred = pred.rename("score")
@@ -1491,7 +1506,7 @@ def main() -> None:
             _log(run_ctx.run_id, f"train_done [{run_ctx.timing['train_sec']}s]")
 
             # Step 2.5: 推理并校验
-            pred_score: pd.Series = _trained_model.predict(dataset, segment="test")
+            pred_score: pd.Series = _predict_on_test_segment(_trained_model, dataset)
         else:
             base_seed = int(cfg["model"].get("kwargs", {}).get("seed", 42))
             seeds = [base_seed + i * 1000 for i in range(n_ensemble)]
