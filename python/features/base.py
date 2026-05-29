@@ -15,7 +15,11 @@ from dataclasses import dataclass, field
 
 
 # 合法的因子分组，用于 feature_groups 过滤
-VALID_GROUPS = frozenset({"momentum", "volume", "technical", "fundamental", "raw_ohlcv"})
+# intraday_raw：5min 频率日内原始序列（B3 架构 B / Deep Factor），仅供日内时序模型，
+#   与 raw_ohlcv 同属 opt-in，且只在 5min 库（fivemin.yaml）有效，禁止用于日频模型。
+VALID_GROUPS = frozenset(
+    {"momentum", "volume", "technical", "fundamental", "raw_ohlcv", "intraday_raw"}
+)
 
 
 @dataclass

@@ -28,16 +28,17 @@ from pathlib import Path
 from typing import Optional
 
 from .base import AlphaDef, VALID_GROUPS
-from . import fundamental, momentum, raw_ohlcv, technical, volume
+from . import fundamental, intraday_raw, momentum, raw_ohlcv, technical, volume
 
 # ── 内置因子注册表（顺序即 QlibDataLoader 中的列顺序）────────────────
-# raw_ohlcv 放最末位，便于审计但属于 opt-in 组（见 _OPT_IN_GROUPS）。
+# raw_ohlcv / intraday_raw 放最末位，便于审计但属于 opt-in 组（见 _OPT_IN_GROUPS）。
 _BUILTIN_ALPHAS: list[AlphaDef] = (
     momentum.ALPHAS
     + volume.ALPHAS
     + technical.ALPHAS
     + fundamental.ALPHAS
     + raw_ohlcv.ALPHAS
+    + intraday_raw.ALPHAS
 )
 
 # ── Opt-in 因子组 ─────────────────────────────────────────────────────
@@ -48,7 +49,7 @@ _BUILTIN_ALPHAS: list[AlphaDef] = (
 # raw_ohlcv 设计动机：专供时序模型（LSTM/GRU/Transformer dataset_type=ts）
 # 使用，与 LGBM 的浓缩因子分工（docs/时序模型优化.md §8.5）。原始 OHLCV
 # 序列对 LGBM 价值低反而引入冗余/噪声。
-_OPT_IN_GROUPS: frozenset[str] = frozenset({"raw_ohlcv"})
+_OPT_IN_GROUPS: frozenset[str] = frozenset({"raw_ohlcv", "intraday_raw"})
 
 
 def _discover_rdagent_alphas() -> list[AlphaDef]:

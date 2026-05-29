@@ -378,6 +378,58 @@ def inject_feature_config(cfg: Dict[str, Any]) -> Dict[str, Any]:
     return cfg
 
 
+def wrap_deep_factor_loader(cfg: Dict[str, Any], parquet_path: str) -> Dict[str, Any]:
+    """将现有 QlibDataLoader 包成 NestedDataLoader，并入 Deep Factor（B3 架构 B）。
+
+    把 scripts/extract_deep_factor.py 产出的 deep_factor.parquet（MultiIndex
+    (datetime, instrument) × DF0..DF{k-1}）作为额外的 feature 组，经
+    StaticDataLoader 与日频 QlibDataLoader（38 因子 + label）在索引上 left-join 合并，
+    交给 LGBM 自学权重。必须在 inject_feature_config 之后调用（此时 feature/label 已注入）。
+
+    Args:
+        cfg:          已注入特征的配置（含 dataset.handler.data_loader = QlibDataLoader）。
+        parquet_path: deep_factor.parquet 路径（相对仓库根或绝对路径）。
+
+    Raises:
+        FileNotFoundError: parquet 不存在。
+        RuntimeError:      data_loader 结构非预期（不是 QlibDataLoader 单层）。
+    """
+    cfg = copy.deepcopy(cfg)
+    p = Path(parquet_path)
+    if not p.is_absolute():
+        p = WORKSPACE_ROOT / parquet_path
+    if not p.exists():
+        raise FileNotFoundError(f"deep_factor.parquet 不存在: {p}")
+
+    handler_kwargs = cfg["dataset"]["kwargs"]["handler"]["kwargs"]
+    inner_loader = handler_kwargs.get("data_loader")
+    if not isinstance(inner_loader, dict) or "data_loader" in inner_loader.get("kwargs", {}):
+        raise RuntimeError("data_loader 结构非预期（期望单层 QlibDataLoader），无法注入 Deep Factor。")
+
+    nested = {
+        "class": "NestedDataLoader",
+        "module_path": "qlib.data.dataset.loader",
+        "kwargs": {
+            "dataloader_l": [
+                inner_loader,  # 日频 38 因子 + label
+                {
+                    "class": "StaticDataLoader",
+                    "module_path": "qlib.data.dataset.loader",
+                    "kwargs": {"config": {"feature": str(p)}},
+                },
+            ],
+            "join": "left",
+        },
+    }
+    handler_kwargs["data_loader"] = nested
+    cfg.setdefault("model_meta", {})["deep_factor_parquet"] = str(p)
+    LOGGER.info(
+        "deep_factor_injected: parquet=%s（NestedDataLoader: QlibDataLoader + StaticDataLoader）", p,
+        extra={"run_id": "init", "instrument": "ALL", "datetime": "", "signal": 0.0, "version": VERSION},
+    )
+    return cfg
+
+
 def build_dataset(cfg: Dict[str, Any]) -> DatasetH:
     return init_instance_by_config(cfg["dataset"])
 
@@ -1266,6 +1318,15 @@ def main() -> None:
         help="临时覆盖 lgbm.yaml 的 bagging_fraction（不传则保持配置文件 0.7）。",
     )
     parser.add_argument(
+        "--deep-factor-parquet",
+        default=None,
+        help=(
+            "B3 架构 B：注入 Deep Factor parquet（scripts/extract_deep_factor.py 产出），"
+            "经 NestedDataLoader 并入 LGBM 特征。也可在 model_meta.deep_factor_parquet 配置。"
+            "相对仓库根或绝对路径。"
+        ),
+    )
+    parser.add_argument(
         "--strategy-cfg",
         default=None,
         help=(
@@ -1419,6 +1480,11 @@ def main() -> None:
 
     cfg = inject_feature_config(cfg)
 
+    # ── B3 Deep Factor 注入（CLI > 配置文件）─────────────────────────
+    deep_factor_parquet = args.deep_factor_parquet or cfg.get("model_meta", {}).get("deep_factor_parquet")
+    if deep_factor_parquet:
+        cfg = wrap_deep_factor_loader(cfg, deep_factor_parquet)
+
     # ── ensemble 超参临时覆盖（CLI > 配置文件） ─────────────────────
     if args.feature_fraction is not None or args.bagging_fraction is not None:
         kw = cfg.setdefault("model", {}).setdefault("kwargs", {})
@@ -1544,6 +1610,26 @@ def main() -> None:
                 test_label = test_data.iloc[:, 0]
         except Exception:
             pass
+
+        # 时序模型回退：TSDatasetH.prepare 返回 TSDataSampler 而非 DataFrame，
+        # 上面的 isinstance 判否会让 test_label=None，导致 IC=NaN。
+        # 此处用底层 handler 直接 fetch label（对齐 test segment），不影响 LGBM 既有路径。
+        if test_label is None:
+            try:
+                from qlib.data.dataset.handler import DataHandlerLP
+
+                handler = getattr(dataset, "handler", None)
+                test_seg = cfg["dataset"]["kwargs"]["segments"]["test"]
+                if handler is not None:
+                    lbl = handler.fetch(
+                        slice(test_seg[0], test_seg[1]),
+                        col_set="label",
+                        data_key=DataHandlerLP.DK_L,
+                    )
+                    if isinstance(lbl, pd.DataFrame) and not lbl.empty:
+                        test_label = lbl.iloc[:, 0]
+            except Exception:
+                pass
 
         # Step 3: 回测（分层执行：SignalLayer → ... → AnalysisLayer）
         t2 = time.perf_counter()

@@ -1,0 +1,48 @@
+# LGBM 主力 + 日内 Deep Factor 注入（B3 架构 B / L5）
+# ============================================================
+# 与 configs/models/lgbm_optuna.yaml 的唯一差异：
+#   1) name: lgbm_deepfactor（独立产物，不动主力 lgbm_optuna）
+#   2) 通过 NestedDataLoader 并入 scripts/extract_deep_factor.py 产出的 deep_factor.parquet
+#
+# 超参与 lgbm_optuna 完全一致（严格变量隔离：唯一变量 = 是否注入 Deep Factor），
+# 以验证「日内 hidden 经 PCA 注入后，LGBM 组合 Sharpe 是否优于纯 LGBM 主力」。
+#
+# 运行（deep_factor.parquet 路径含 hash，建议用 CLI 传入）：
+#   python python/run_experiment.py --model lgbm_deepfactor --freq daily \
+#       --deep-factor-parquet artifacts/deep_factors/gru_intraday_<hash>_k8/deep_factor.parquet
+# 也可在下方 model_meta.deep_factor_parquet 写死路径。
+
+model:
+  class: LGBModel
+  kwargs:
+    bagging_fraction: 0.6370761961280168
+    bagging_freq: 1
+    bagging_seed: 42
+    data_random_seed: 42
+    deterministic: true
+    early_stopping_rounds: 200
+    extra_trees: true
+    feature_fraction: 0.8637788066524075
+    feature_fraction_bynode: 0.85
+    feature_fraction_seed: 42
+    force_col_wise: true
+    learning_rate: 0.044448339535094646
+    loss: mse
+    max_depth: 5
+    min_child_samples: 485
+    min_split_gain: 0.0
+    num_boost_round: 5000
+    num_leaves: 18
+    num_threads: -1
+    path_smooth: 2.0
+    reg_alpha: 0.3
+    reg_lambda: 0.6699530280754894
+    seed: 42
+  module_path: qlib.contrib.model.gbdt
+model_meta:
+  combined_factors_json: configs/combined_factors_df.json
+  dataset_type: flat
+  feature_groups: null
+  freq_key: 1day
+  name: lgbm_deepfactor
+  # deep_factor_parquet: artifacts/deep_factors/gru_intraday_<hash>_k8/deep_factor.parquet

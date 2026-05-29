@@ -45,5 +45,5 @@ model:
     loss: "mse"
     optimizer: "adam"
     n_jobs: 4
-    GPU: -1
+    GPU: 0
     seed: 42

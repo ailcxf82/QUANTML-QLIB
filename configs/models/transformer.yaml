@@ -30,5 +30,5 @@ model:
     loss: "mse"
     optimizer: "adam"
     reg: 0.001
-    GPU: -1
+    GPU: 0
     seed: 42

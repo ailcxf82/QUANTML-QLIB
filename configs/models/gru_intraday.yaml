@@ -1,0 +1,42 @@
+# 日内 5min GRU 模型（B3 架构 B / Deep Factor）
+# ============================================================
+# 设计动机：docs/时序模型优化.md §8.5 架构 B。日内 5min 序列经 GRU 压缩为 hidden state，
+# 再由 scripts/extract_deep_factor.py 提取 + PCA 降维注入 LGBM。
+#
+# 重要：本配置不走 run_experiment.py 的 TSDatasetH（其在 5min 日历上是逐 bar 滑窗，
+# 无法做「每日 48 根 → 一个日度样本」的日内池化）。改由自定义脚本消费：
+#   python scripts/train_intraday_model.py --model-config configs/models/gru_intraday.yaml \
+#       --freq-config configs/freq/fivemin.yaml
+# 该脚本按 (交易日, 股票) 把当日 48 根 5min bar 重塑为 [48, 6] 序列，标签为日度前向收益。
+
+model_meta:
+  name: "gru_intraday"
+  dataset_type: "ts_intraday"     # 自定义：每日一段日内序列
+  step_len: 48                    # 单日 48 根 5min bar
+  freq_key: "5min"
+  feature_groups:
+    - intraday_raw                # 6 维：I_OPEN_R/I_HIGH_R/I_LOW_R/I_CLOSE_R/I_VOL_R/I_AMT_R
+
+# 标签：日度前向收益（与日频 LGBM 同口径），由 5min 末根收盘价推导
+#   label_T = close_{T+2}/close_{T+1} - 1
+label:
+  expr: "fwd_ret_t1_t2"           # 训练脚本内部按末根收盘价计算，避免 5min 表达 Ref 跨日歧义
+
+model:
+  class: "GRU"
+  arch_ref: "qlib.contrib.model.pytorch_gru_ts.GRUModel"   # hidden 提取需与该结构一致
+  kwargs:
+    d_feat: 6                     # = feature_count(["intraday_raw"])
+    hidden_size: 64               # Deep Factor 提取 out[:, -1, :] 的维度
+    num_layers: 2
+    dropout: 0.1
+    n_epochs: 60
+    lr: 0.001
+    batch_size: 2048
+    early_stop: 12
+    loss: "mse"
+    optimizer: "adam"
+    GPU: 0
+    seed: 42
+
+# 训练区间继承 fivemin.yaml 的 dataset_segments（train/valid/test）

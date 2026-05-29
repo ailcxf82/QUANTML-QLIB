@@ -1,0 +1,36 @@
+# 5min 频率配置（B3 分钟 Deep Factor / 架构 B）
+# ============================================================
+# 用途：日内 5min 时序模型（gru_intraday）训练所用的数据源与切分。
+# 数据来源：BaoStock 5min（csi500），经 python/data/baostock_5min_updater.py 采集，
+#           scripts/build_5min_qlib_data.py 入库为 qlib bin。
+#
+# 与日频主链路（configs/freq/daily.yaml）的关系：
+#   - 本配置仅供「日内时序模型训练 + Deep Factor 提取」使用，provider_uri 指向独立的
+#     5min 库 D:/qlib_data/qlib_data_5min（不影响日频 LGBM 主链路）。
+#   - segments 与 daily.yaml 完全对齐（同 train/valid/test），保证 Deep Factor 的
+#     train-fit PCA 与 LGBM 训练区间一致，防止泄漏。
+#
+# 数据就绪流程（数据采集在可联网机器完成后）：
+#   1) python scripts/build_5min_qlib_data.py --csv-dir D:/qlib_data/csv_data_5min \
+#          --qlib-dir D:/qlib_data/qlib_data_5min   # dump + 校验
+#   2) 校验 PASS 后，将下方 data_ready 改为 true
+
+freq_meta:
+  name: "fivemin"
+  freq_key: "5min"
+  # 数据就绪（dump+校验通过）前保持 false；自定义训练脚本与 run_experiment 均检查此标志
+  data_ready: false
+
+# 覆盖 base.yaml 的 qlib_init.provider_uri —— 指向独立的 5min 库
+qlib_init:
+  provider_uri: "D:/qlib_data/qlib_data_5min"
+  region: cn
+
+# 与 daily.yaml 对齐的切分（按 5min 日历切片，区间端点为自然日）
+dataset_segments:
+  train: ["2020-01-01", "2023-12-31"]
+  valid: ["2024-01-01", "2024-12-31"]
+  test:  ["2025-01-01", "2026-05-22"]
+
+# 注：日内时序模型不做 5min 撮合回测（deal price/撮合不在本期），
+# 故不提供 executor/backtest；模型仅用于产出 hidden → Deep Factor。
