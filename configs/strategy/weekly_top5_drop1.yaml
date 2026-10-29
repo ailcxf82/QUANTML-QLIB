@@ -1,0 +1,10 @@
+# Historical research candidate: all original boards, once per ISO week.
+# Use with the repaired daily quote/fee configuration (5bp per-side slippage).
+strategy:
+  class: WeeklyTopkDropoutStrategy
+  module_path: backtest.strategy.weekly_topk
+  kwargs:
+    topk: 5
+    n_drop: 1
+    only_tradable: true
+    forbid_all_trade_at_limit: true

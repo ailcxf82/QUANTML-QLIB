@@ -13,7 +13,7 @@ experiment:
   market: "all"
   benchmark: "000905.SZ"
   start_time: "2020-01-01"
-  end_time: "2026-05-22"
+  end_time: "2026-10-15"
   seed: 42
   account: 300000
   # 回测可投资股票池：只在 csi500 中选股，避免选到 ST/小盘/退市风险股
@@ -45,7 +45,7 @@ dataset:
       module_path: "qlib.data.dataset.handler"
       kwargs:
         start_time: "2020-01-01"
-        end_time: "2026-05-22"
+        end_time: "2026-10-15"
         # 训练用全市场（保留特征丰富度），回测时通过 tradable_universe 过滤
         instruments: "all"
         infer_processors:

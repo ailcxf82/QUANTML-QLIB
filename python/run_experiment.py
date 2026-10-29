@@ -125,6 +125,13 @@ _MODEL_ALIASES: Dict[str, str] = {
     # lgbm_optuna: Optuna 超参搜索结果（Trial 4，WF Sharpe 7.15）
     "lgbm_optuna": "lgbm_optuna",
     "lgbmoptuna": "lgbm_optuna",
+    # lgbm_5min_agg: daily LGBM with optional external 5min aggregate feature parquet
+    "lgbm_5min_agg": "lgbm_5min_agg",
+    "lgbm5minagg": "lgbm_5min_agg",
+    "lgbm_intraday_agg": "lgbm_5min_agg",
+    # lgbm_deepfactor: daily LGBM with optional GRU/PCA deep factor parquet
+    "lgbm_deepfactor": "lgbm_deepfactor",
+    "lgbmdeepfactor": "lgbm_deepfactor",
     # mlp
     "mlp": "mlp",
     "dnn": "mlp",
@@ -164,6 +171,10 @@ _FREQ_ALIASES: Dict[str, str] = {
     "min": "minute",
     "1min": "minute",
     "m": "minute",
+    "fivemin": "fivemin",
+    "5min": "fivemin",
+    "fivemin_dev": "fivemin_dev",
+    "5min_dev": "fivemin_dev",
 }
 
 
@@ -378,6 +389,77 @@ def inject_feature_config(cfg: Dict[str, Any]) -> Dict[str, Any]:
     return cfg
 
 
+def wrap_static_feature_loader(
+    cfg: Dict[str, Any],
+    parquet_path: str,
+    *,
+    meta_key: str,
+    feature_label: str,
+) -> Dict[str, Any]:
+    """将现有 QlibDataLoader 包成 NestedDataLoader，并入一个外部静态特征包。
+
+    外部特征包必须是 parquet，索引为 MultiIndex(datetime, instrument)，列为要并入
+    LGBM 的特征。典型来源包括 5min 聚合因子、GRU/PCA Deep Factor，或其它离线特征
+    产物。必须在 inject_feature_config 之后调用（此时日频 feature/label 已注入）。
+
+    Args:
+        cfg:           已注入特征的配置（含 dataset.handler.data_loader = QlibDataLoader）。
+        parquet_path:  外部特征 parquet 路径（相对仓库根或绝对路径）。
+        meta_key:      写入 model_meta 的审计字段名。
+        feature_label: 日志/报错中的人类可读名称。
+
+    Raises:
+        FileNotFoundError: parquet 不存在。
+        RuntimeError:      data_loader 结构非预期（不是 QlibDataLoader 单层）。
+    """
+    cfg = copy.deepcopy(cfg)
+    p = Path(parquet_path)
+    if not p.is_absolute():
+        p = WORKSPACE_ROOT / parquet_path
+    if not p.exists():
+        raise FileNotFoundError(f"{feature_label} parquet 不存在: {p}")
+
+    handler_kwargs = cfg["dataset"]["kwargs"]["handler"]["kwargs"]
+    inner_loader = handler_kwargs.get("data_loader")
+    if not isinstance(inner_loader, dict):
+        raise RuntimeError(f"data_loader 结构非预期，无法注入 {feature_label}。")
+
+    static_loader = {
+        "class": "StaticDataLoader",
+        "module_path": "qlib.data.dataset.loader",
+        "kwargs": {"config": {"feature": str(p)}},
+    }
+
+    if inner_loader.get("class") == "NestedDataLoader":
+        inner_loader.setdefault("kwargs", {}).setdefault("dataloader_l", []).append(static_loader)
+        inner_loader.setdefault("kwargs", {}).setdefault("join", "left")
+    elif "data_loader" not in inner_loader.get("kwargs", {}):
+        handler_kwargs["data_loader"] = {
+            "class": "NestedDataLoader",
+            "module_path": "qlib.data.dataset.loader",
+            "kwargs": {
+                "dataloader_l": [inner_loader, static_loader],
+                "join": "left",
+            },
+        }
+    else:
+        raise RuntimeError(
+            f"data_loader 结构非预期（期望单层 QlibDataLoader 或 NestedDataLoader），无法注入 {feature_label}。"
+        )
+    model_meta = cfg.setdefault("model_meta", {})
+    model_meta[meta_key] = str(p)
+    external_features = model_meta.setdefault("external_feature_parquets", [])
+    if str(p) not in external_features:
+        external_features.append(str(p))
+    LOGGER.info(
+        "%s_injected: parquet=%s（NestedDataLoader: QlibDataLoader + StaticDataLoader）",
+        feature_label,
+        p,
+        extra={"run_id": "init", "instrument": "ALL", "datetime": "", "signal": 0.0, "version": VERSION},
+    )
+    return cfg
+
+
 def wrap_deep_factor_loader(cfg: Dict[str, Any], parquet_path: str) -> Dict[str, Any]:
     """将现有 QlibDataLoader 包成 NestedDataLoader，并入 Deep Factor（B3 架构 B）。
 
@@ -394,40 +476,12 @@ def wrap_deep_factor_loader(cfg: Dict[str, Any], parquet_path: str) -> Dict[str,
         FileNotFoundError: parquet 不存在。
         RuntimeError:      data_loader 结构非预期（不是 QlibDataLoader 单层）。
     """
-    cfg = copy.deepcopy(cfg)
-    p = Path(parquet_path)
-    if not p.is_absolute():
-        p = WORKSPACE_ROOT / parquet_path
-    if not p.exists():
-        raise FileNotFoundError(f"deep_factor.parquet 不存在: {p}")
-
-    handler_kwargs = cfg["dataset"]["kwargs"]["handler"]["kwargs"]
-    inner_loader = handler_kwargs.get("data_loader")
-    if not isinstance(inner_loader, dict) or "data_loader" in inner_loader.get("kwargs", {}):
-        raise RuntimeError("data_loader 结构非预期（期望单层 QlibDataLoader），无法注入 Deep Factor。")
-
-    nested = {
-        "class": "NestedDataLoader",
-        "module_path": "qlib.data.dataset.loader",
-        "kwargs": {
-            "dataloader_l": [
-                inner_loader,  # 日频 38 因子 + label
-                {
-                    "class": "StaticDataLoader",
-                    "module_path": "qlib.data.dataset.loader",
-                    "kwargs": {"config": {"feature": str(p)}},
-                },
-            ],
-            "join": "left",
-        },
-    }
-    handler_kwargs["data_loader"] = nested
-    cfg.setdefault("model_meta", {})["deep_factor_parquet"] = str(p)
-    LOGGER.info(
-        "deep_factor_injected: parquet=%s（NestedDataLoader: QlibDataLoader + StaticDataLoader）", p,
-        extra={"run_id": "init", "instrument": "ALL", "datetime": "", "signal": 0.0, "version": VERSION},
+    return wrap_static_feature_loader(
+        cfg,
+        parquet_path,
+        meta_key="deep_factor_parquet",
+        feature_label="deep_factor",
     )
-    return cfg
 
 
 def build_dataset(cfg: Dict[str, Any]) -> DatasetH:
@@ -815,6 +869,7 @@ def persist_artifacts(
         "model": model_name,
         "freq": freq_name,
         "timing_seconds": run_ctx.timing,
+        "return_basis": "net_of_transaction_costs",
         "metrics": metrics,
     }
     if rolling_meta is not None:
@@ -881,6 +936,12 @@ def persist_artifacts(
             label_expr_for_meta = cfg.get("model_meta", {}).get("label_expr")
             if label_expr_for_meta:
                 model_meta["label_expr"] = label_expr_for_meta
+            external_feature_parquets_for_meta = cfg.get("model_meta", {}).get("external_feature_parquets")
+            if external_feature_parquets_for_meta:
+                model_meta["external_feature_parquets"] = list(external_feature_parquets_for_meta)
+            deep_factor_for_meta = cfg.get("model_meta", {}).get("deep_factor_parquet")
+            if deep_factor_for_meta:
+                model_meta["deep_factor_parquet"] = deep_factor_for_meta
             # 把 metrics 也写入 latest meta，供 factor_lab.py compare 一站式拉指标
             # （metrics.json 在 run 目录里，但 latest meta 直接放摘要可避免对比脚本扫多个目录）
             if metrics:
@@ -1327,6 +1388,16 @@ def main() -> None:
         ),
     )
     parser.add_argument(
+        "--external-feature-parquet",
+        action="append",
+        default=None,
+        help=(
+            "注入通用外部特征 parquet（MultiIndex: datetime,instrument），例如 5min 聚合因子。"
+            "可重复传多次；也可在 model_meta.external_feature_parquet 或 "
+            "model_meta.external_feature_parquets 配置。"
+        ),
+    )
+    parser.add_argument(
         "--strategy-cfg",
         default=None,
         help=(
@@ -1479,6 +1550,24 @@ def main() -> None:
         cfg["model_meta"]["label_expr"] = new_label_expr
 
     cfg = inject_feature_config(cfg)
+
+    # ── 通用外部特征注入（CLI > 配置文件）───────────────────────────
+    external_feature_parquets: List[str] = []
+    configured_external = cfg.get("model_meta", {}).get("external_feature_parquets")
+    if isinstance(configured_external, list):
+        external_feature_parquets.extend(str(x) for x in configured_external if x)
+    configured_external_one = cfg.get("model_meta", {}).get("external_feature_parquet")
+    if configured_external_one:
+        external_feature_parquets.append(str(configured_external_one))
+    if args.external_feature_parquet:
+        external_feature_parquets.extend(str(x) for x in args.external_feature_parquet if x)
+    for i, feature_parquet in enumerate(dict.fromkeys(external_feature_parquets), 1):
+        cfg = wrap_static_feature_loader(
+            cfg,
+            feature_parquet,
+            meta_key="external_feature_parquet",
+            feature_label=f"external_feature_{i}",
+        )
 
     # ── B3 Deep Factor 注入（CLI > 配置文件）─────────────────────────
     deep_factor_parquet = args.deep_factor_parquet or cfg.get("model_meta", {}).get("deep_factor_parquet")

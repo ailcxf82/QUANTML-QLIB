@@ -1,0 +1,25 @@
+# 5min development frequency config.
+# Uses the small local CSV-derived dev store. This is for pipeline smoke tests only,
+# not for production CSI500 conclusions.
+
+freq_meta:
+  name: "fivemin_dev"
+  freq_key: "5min"
+  data_ready: false
+  allow_small_universe: true
+
+qlib_init:
+  provider_uri: "D:/qlib_data/qlib_data_5min_dev"
+  region: cn
+
+dataset_segments:
+  train: ["2020-01-01", "2023-12-31"]
+  valid: ["2024-01-01", "2024-12-31"]
+  test:  ["2025-01-01", "2026-05-22"]
+
+intraday:
+  enabled: true
+  mode: "dev"
+  csv_dir: "D:/qlib_data/csv_data_5min"
+  expected_bars_per_day: 48
+  min_instruments: 1

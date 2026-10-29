@@ -1,0 +1,46 @@
+# LGBM daily model with optional 5min aggregate feature injection.
+#
+# This config keeps the same hyperparameters as lgbm_optuna and isolates the
+# artifact name. Pass the 5min feature parquet at runtime:
+#
+#   python python/run_experiment.py --model lgbm_5min_agg --freq daily \
+#     --external-feature-parquet artifacts/intraday_agg/dev/features.parquet
+#
+# The same model can run without the external parquet, but then it is only an
+# isolated baseline and does not consume 5min features.
+
+model:
+  class: LGBModel
+  kwargs:
+    bagging_fraction: 0.6370761961280168
+    bagging_freq: 1
+    bagging_seed: 42
+    data_random_seed: 42
+    deterministic: true
+    early_stopping_rounds: 200
+    extra_trees: true
+    feature_fraction: 0.8637788066524075
+    feature_fraction_bynode: 0.85
+    feature_fraction_seed: 42
+    force_col_wise: true
+    learning_rate: 0.044448339535094646
+    loss: mse
+    max_depth: 5
+    min_child_samples: 485
+    min_split_gain: 0.0
+    num_boost_round: 5000
+    num_leaves: 18
+    num_threads: -1
+    path_smooth: 2.0
+    reg_alpha: 0.3
+    reg_lambda: 0.6699530280754894
+    seed: 42
+  module_path: qlib.contrib.model.gbdt
+
+model_meta:
+  combined_factors_json: configs/combined_factors_df.json
+  dataset_type: flat
+  feature_groups: null
+  freq_key: 1day
+  name: lgbm_5min_agg
+  # external_feature_parquet: artifacts/intraday_agg/dev/features.parquet

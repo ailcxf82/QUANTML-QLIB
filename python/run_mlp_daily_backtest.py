@@ -158,7 +158,10 @@ def run_backtest(
 
 def compute_metrics(report_df: pd.DataFrame) -> Dict[str, float]:
     """计算策略评估所需全部指标。"""
-    excess_return = report_df["return"] - report_df["bench"]
+    from backtest.portfolio_layer import PortfolioLayer
+
+    state = PortfolioLayer().parse({FREQ_KEY: report_df}, FREQ_KEY)
+    excess_return = state.excess_return
     analysis = risk_analysis(excess_return)
 
     # risk_analysis 返回 DataFrame：行为指标名，列为 "risk"
@@ -169,7 +172,7 @@ def compute_metrics(report_df: pd.DataFrame) -> Dict[str, float]:
             return float("nan")
 
     turnover_mean = float(report_df["turnover"].mean()) if "turnover" in report_df.columns else float("nan")
-    win_rate = float((report_df["return"] > 0).mean())
+    win_rate = float((state.returns > 0).mean())
 
     return {
         "annualized_return": _get("annualized_return"),

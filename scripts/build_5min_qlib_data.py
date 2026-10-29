@@ -134,6 +134,11 @@ def main() -> None:
     parser.add_argument("--limit-nums", type=int, default=None, help="只 dump 前 N 个 CSV（冒烟）")
     parser.add_argument("--validate-only", action="store_true", help="跳过 dump，只校验已入库数据")
     parser.add_argument("--sample", type=int, default=20, help="校验抽样标的数")
+    parser.add_argument(
+        "--audit-out",
+        default=None,
+        help="可选：将校验摘要写入 JSON，例如 artifacts/_audit/5min_validate_dev.json",
+    )
     args = parser.parse_args()
 
     csv_dir = Path(args.csv_dir)
@@ -147,6 +152,11 @@ def main() -> None:
         )
 
     summary = validate(qlib_dir, sample=args.sample)
+    if args.audit_out:
+        audit_path = Path(args.audit_out)
+        audit_path.parent.mkdir(parents=True, exist_ok=True)
+        audit_path.write_text(json.dumps(summary, ensure_ascii=False, indent=2, default=str), encoding="utf-8")
+        print(f"[audit] wrote {audit_path}")
     print(json.dumps(summary, ensure_ascii=False, indent=2, default=str))
     if not summary["ok"]:
         print("[validate] 发现问题，请检查上面的 issues")

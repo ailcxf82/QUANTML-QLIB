@@ -539,7 +539,7 @@ class AnalysisLayer:
         ax.plot(
             state.cumulative_return.index,
             state.cumulative_return.values,
-            label="策略",
+            label="策略（扣费后）",
             color="#D94040",
             linewidth=1.8,
             zorder=3,
@@ -1023,7 +1023,7 @@ class AnalysisLayer:
       <table>
         <tr>
           <th>指标名称</th>
-          <th>策略</th>
+          <th>策略（扣费后）</th>
           <th>基准 (000905)</th>
           <th>超额</th>
           <th>说明</th>

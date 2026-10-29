@@ -21,6 +21,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Dict
 
+import numpy as np
 import pandas as pd
 
 
@@ -93,8 +94,16 @@ class PortfolioLayer:
                 f"实际类型: {type(report_df)}"
             )
 
-        # 提取核心序列，缺失列做安全降级
-        returns = report_df["return"].fillna(0.0)
+        # Qlib return 是扣费前收益，cost 是以期初账户净值为分母的费用率。
+        # 缺失费用不能视为零：旧版导出丢失 cost 时，须先从成交记录核对恢复。
+        for column in ("return", "cost"):
+            if column not in report_df:
+                raise ValueError(f"report_df 缺少 {column}，无法确认扣费后收益")
+            if not np.isfinite(report_df[column].to_numpy(dtype=float)).all():
+                raise ValueError(f"report_df.{column} 含缺失或非有限值")
+        if (report_df["cost"] < 0).any():
+            raise ValueError("report_df.cost 不可为负")
+        returns = report_df["return"] - report_df["cost"]
         benchmark = report_df["bench"].fillna(0.0)
 
         if "turnover" in report_df.columns:
@@ -119,14 +128,16 @@ class PortfolioLayer:
         )
 
     def to_dataframe(self, state: PortfolioState) -> pd.DataFrame:
-        """将 PortfolioState 转为宽格式 DataFrame，方便持久化。"""
-        return pd.DataFrame(
-            {
-                "return": state.returns,
-                "bench": state.benchmark,
-                "turnover": state.turnover,
-                "excess": state.excess_return,
-                "cum_return": state.cumulative_return,
-                "cum_bench": state.cumulative_benchmark,
-            }
-        )
+        """保留 Qlib 原始列；return 仍为毛收益，net_return 及绩效为扣费口径。
+
+        保留 cost/account/cash 等审计列，重新 parse 导出文件时不会重复扣费。
+        """
+        report = state.raw_report_df.copy()
+        report["net_return"] = state.returns
+        report["bench"] = state.benchmark
+        report["turnover"] = state.turnover
+        report["excess"] = state.excess_return
+        report["cum_return"] = state.cumulative_return
+        report["cum_return_gross"] = (1.0 + report["return"]).cumprod()
+        report["cum_bench"] = state.cumulative_benchmark
+        return report

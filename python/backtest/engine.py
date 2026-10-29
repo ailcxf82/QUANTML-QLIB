@@ -152,7 +152,6 @@ class BacktestEngine:
         # ──────────────────────────────────────────────────────────────────
         # [4] 市场层：构建交易成本 exchange_kwargs
         # ──────────────────────────────────────────────────────────────────
-        exchange_kwargs = self._market_layer.build(cfg["backtest"], freq_key)
 
         # ──────────────────────────────────────────────────────────────────
         # 调用 Qlib 回测引擎
@@ -186,6 +185,9 @@ class BacktestEngine:
             pass
 
         # 开始日与 dataset.test 对齐；结束日见 qlib_bt_end（与 experiment.end_time 无关）。
+        exchange_kwargs = self._market_layer.build(
+            cfg["backtest"], freq_key, start_time=test_seg[0], end_time=qlib_bt_end
+        )
         portfolio_metric_dict, indicator_dict = qlib_backtest(
             start_time=test_seg[0],
             end_time=qlib_bt_end,
@@ -195,6 +197,8 @@ class BacktestEngine:
             account=exp_cfg["account"],
             exchange_kwargs=exchange_kwargs,
         )
+        if output_dir is not None and strategy_obj is not None and hasattr(strategy_obj, 'get_review_events'):
+            strategy_obj.get_review_events().to_csv(output_dir / 'review_schedule.csv', index=False)
 
         # 持久化止盈止损触发事件（仅 QuantMLWeightStrategy 提供 get_exit_events）
         exit_events_df: Optional[pd.DataFrame] = None
@@ -229,6 +233,11 @@ class BacktestEngine:
 
         # 提取每笔订单明细 + FIFO 已实现盈亏
         trade_records: TradeRecords = self._trade_layer.extract(indicator_dict)
+        if cfg['backtest'].get('fee_model') is not None:
+            from .fees import AShareFees
+            trade_records.trades = AShareFees(**cfg['backtest']['fee_model']).annotate(trade_records.trades)
+            if output_dir is not None:
+                trade_records.trades.to_csv(output_dir / 'trade_cost_components.csv', index=False)
 
         # ──────────────────────────────────────────────────────────────────
         # [6] 分析层：计算指标 + 生成报告

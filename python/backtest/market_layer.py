@@ -1,27 +1,8 @@
-"""
-市场模拟层（Market Simulation Layer）
-======================================
-职责：
-  - 封装 A 股真实交易成本模型（佣金、印花税、滑点、最小费用）
-  - 处理涨跌停限制（limit_threshold）
-  - 构造 Qlib exchange_kwargs，注入频率信息
-  - 提供成本说明描述供报告使用
+"""Market simulation settings and cost descriptions.
 
-输入: backtest_cfg（dict，来自 YAML）+ freq_key（"1day" / "1min"）
-输出: exchange_kwargs dict，可直接传入 qlib.backtest.backtest()
-
-A 股成本结构（W1 修正后默认值，2026-05-26）：
-  买入  open_cost  = 0.0035 = 佣金 0.05% + 过户费 0.10% + 滑点 0.10% + 缓冲 0.20%
-  卖出  close_cost = 0.0045 = 佣金 0.05% + 印花 0.10% + 过户 0.10% + 滑点 0.10% + 缓冲 0.20%
-  双边合计 ≈ 0.80%（含 10bp×2 滑点估计，对应 csi500 中小盘 topk=8 单票实际滑点）
-  最低费用 5 元 / 单边
-  涨跌停  ±9.5%（A 股 ±10% 阈值前保护）
-
-历史变更：
-  - 之前（2026-05 前）：open_cost=0.0025, close_cost=0.0035，未含滑点
-    实盘 vs 回测 sharpe gap ≈ 0.3 的主要来源之一
-  - W1 修正（2026-05-26，docs/lessons/2026-05-26_w1_cost_alignment.md）：
-    双边各 +10bp 滑点估计，对应 csi500 中小盘 5min VWAP 实测分布的 90% 分位
+Daily runs use explicit commission, stamp tax, transfer fee and slippage.
+Historical configurations retain their aggregate rates without inventing a
+component breakdown. Slippage is a cash-equivalent assumption, not observed fills.
 """
 from __future__ import annotations
 
@@ -35,12 +16,13 @@ class CostModel:
     A 股交易成本模型配置。
 
     Attributes:
-        open_cost:       买入费率（默认 0.35%：佣金+过户+滑点+缓冲）
-        close_cost:      卖出费率（默认 0.45%：佣金+印花+过户+滑点+缓冲）
+        open_cost:       历史合并买入费率
+        close_cost:      历史合并卖出费率
         min_cost:        单笔最低费用（元）
         limit_threshold: 涨跌停保护阈值（0.095 表示 ±9.5%，触达则无法成交）
         deal_price:      成交价字段（"$close_qfq" / "$open_qfq" / "vwap"）
     """
+    fee_model: dict | None = None
     open_cost: float = 0.0035
     close_cost: float = 0.0045
     min_cost: float = 5.0
@@ -54,22 +36,20 @@ class CostModel:
 
     @property
     def slippage_estimate(self) -> float:
-        """双边滑点估计（成本中扣除佣金/印花/过户后的剩余部分）。"""
-        # 固定项：佣金 0.05%×2 + 印花 0.10%（仅卖）+ 过户 0.10%×2 = 0.40%
-        fixed = 0.0005 * 2 + 0.0010 + 0.0010 * 2
-        return max(0.0, self.roundtrip_cost - fixed)
+        """Explicit slippage only; legacy aggregate costs have no known split."""
+        return self.fee_model['slippage_rate'] * 2 if self.fee_model is not None else None
 
     def describe(self) -> str:
-        return (
-            f"A 股成本模型\n"
-            f"    买入手续费   : {self.open_cost*100:.3f}%\n"
-            f"    卖出手续费   : {self.close_cost*100:.3f}%（含 0.10% 印花税）\n"
-            f"    双边合计     : {self.roundtrip_cost*100:.3f}%\n"
-            f"    其中滑点估计 : {self.slippage_estimate*100:.3f}%（双边）\n"
-            f"    最低费用     : {self.min_cost:.0f} 元\n"
-            f"    成交价       : {self.deal_price}\n"
-            f"    涨跌停阈值   : ±{self.limit_threshold*100:.1f}%"
-        )
+        if self.fee_model is not None:
+            from .fees import AShareFees
+            fee = AShareFees(**self.fee_model)
+            return (f"A股分项成本：佣金双边 {fee.commission_rate:.3%}（含规费），"
+                    f"最低每笔 {fee.minimum_commission:g} 元；印花税仅卖出 {fee.stamp_tax_sell_rate:.3%}；"
+                    f"过户费双边 {fee.transfer_rate:.3%}；滑点假设单边 {fee.slippage_rate:.3%}，"
+                    "按成交金额单独扣款，计入净收益。")
+        return (f"历史合并成本：买入 {self.open_cost:.3%}，卖出 {self.close_cost:.3%}，"
+                f"合并最低费用 {self.min_cost:g} 元；无可靠分项，不推定滑点或税费。")
+
 
 
 class MarketLayer:
@@ -84,6 +64,9 @@ class MarketLayer:
         self,
         backtest_cfg: Dict[str, Any],
         freq_key: str,
+        *,
+        start_time=None,
+        end_time=None,
     ) -> Dict[str, Any]:
         """
         构建 exchange_kwargs。
@@ -98,15 +81,43 @@ class MarketLayer:
         exchange_kwargs = dict(backtest_cfg.get("exchange_kwargs", {}))
         # 确保 freq 字段与当前回测频率一致
         exchange_kwargs["freq"] = "1min" if freq_key == "1min" else "day"
+        contract = backtest_cfg.get('quote_contract')
+        if backtest_cfg.get('fee_model') is not None:
+            if contract != 'tushare_qfq_v1':
+                raise ValueError('Explicit fees require the validated daily quote contract')
+            from .fees import AShareFees
+            from dataclasses import asdict
+            fees = AShareFees(**backtest_cfg['fee_model'])
+            if any(k in exchange_kwargs for k in ('open_cost', 'close_cost', 'min_cost')):
+                raise ValueError('Do not mix explicit fees with legacy aggregate costs')
+            exchange_kwargs['fee_model'] = asdict(fees)
+        if contract is not None:
+            if contract != 'tushare_qfq_v1':
+                raise ValueError(f'Unknown quote contract: {contract}')
+            if start_time is None or end_time is None:
+                raise ValueError('Quote contract requires explicit backtest dates')
+            if 'exchange' in exchange_kwargs:
+                raise ValueError('quote_contract cannot override a custom exchange')
+            exchange_kwargs.update(start_time=start_time, end_time=end_time)
+            return {'exchange': {'class': 'TushareQfqExchange',
+                                 'module_path': 'backtest.quote_contract',
+                                 'kwargs': exchange_kwargs}}
         return exchange_kwargs
 
     def extract_cost_model(self, backtest_cfg: Dict[str, Any]) -> CostModel:
         """从配置中提取 CostModel，方便报告中展示成本参数。
 
-        默认值与 W1 修正后的生产配置对齐（含滑点估计）；
-        历史 yaml 显式提供时以 yaml 为准。
+        分项配置优先；历史合并费率只展示总额，不推断组成。
         """
         ekw = backtest_cfg.get("exchange_kwargs", {})
+        if backtest_cfg.get('fee_model') is not None:
+            from .fees import AShareFees
+            from dataclasses import asdict
+            fee = AShareFees(**backtest_cfg['fee_model'])
+            return CostModel(fee_model=asdict(fee), open_cost=fee.rate(), close_cost=fee.rate(True),
+                             min_cost=fee.minimum_commission,
+                             limit_threshold=ekw.get('limit_threshold', .095),
+                             deal_price=ekw.get('deal_price', '$close_qfq'))
         return CostModel(
             open_cost=ekw.get("open_cost", 0.0035),
             close_cost=ekw.get("close_cost", 0.0045),
